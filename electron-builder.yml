@@ -1,0 +1,16 @@
+appId: com.catmeme.studio
+productName: Cat Meme Studio
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+win:
+  signAndEditExecutable: false
+  target:
+    - portable
+  artifactName: ${productName}-${version}-${arch}.${ext}
+portable:
+  artifactName: ${productName}-${version}-portable-${arch}.${ext}

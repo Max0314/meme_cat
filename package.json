@@ -1,0 +1,38 @@
+{
+  "name": "cat-meme-studio",
+  "version": "0.1.0",
+  "description": "Windows desktop app for generating Chinese cat meme short videos.",
+  "main": "out/main/index.js",
+  "author": "Cat Meme Studio",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "build:app": "electron-vite build",
+    "build": "npm run dist:dir",
+    "build:full": "npm run typecheck && npm run build:app && electron-builder --win zip --config electron-builder.full.yml",
+    "build:portable": "npm run typecheck && npm run build:app && electron-builder --win portable --config electron-builder.yml",
+    "dist:dir": "npm run typecheck && npm run build:app && electron-builder --win --dir --config electron-builder.yml"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.2",
+    "@electron-toolkit/utils": "^4.0.0",
+    "ffmpeg-static": "^5.2.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^42.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

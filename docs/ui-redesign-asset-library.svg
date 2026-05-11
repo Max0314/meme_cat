@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="900" viewBox="0 0 1500 900">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#edf3f8"/>
+    </linearGradient>
+    <pattern id="checker2" width="22" height="22" patternUnits="userSpaceOnUse">
+      <rect width="22" height="22" fill="#e8edf4"/>
+      <rect width="11" height="11" fill="#f6f8fb"/>
+      <rect x="11" y="11" width="11" height="11" fill="#f6f8fb"/>
+    </pattern>
+    <style>
+      .title{font:700 28px "Microsoft YaHei",Arial,sans-serif;fill:#152238}
+      .h2{font:700 20px "Microsoft YaHei",Arial,sans-serif;fill:#152238}
+      .h3{font:700 16px "Microsoft YaHei",Arial,sans-serif;fill:#1f2f46}
+      .txt{font:400 15px "Microsoft YaHei",Arial,sans-serif;fill:#66758c}
+      .small{font:400 13px "Microsoft YaHei",Arial,sans-serif;fill:#7c8aa0}
+      .label{font:600 14px "Microsoft YaHei",Arial,sans-serif;fill:#34506f}
+      .panel{fill:#ffffff;stroke:#d7e0ed;stroke-width:1}
+      .subpanel{fill:#f8fafd;stroke:#dce5f0;stroke-width:1}
+    </style>
+  </defs>
+  <rect width="1500" height="900" fill="url(#bg2)"/>
+  <rect x="28" y="28" width="1444" height="844" rx="14" class="panel"/>
+  <text x="58" y="74" class="title">素材库重构：大素材量下的快速定位</text>
+  <text x="58" y="104" class="txt">分类、搜索、分页、悬停预览、收藏和当前帧投放保持在一个连续工作流里。</text>
+
+  <rect x="58" y="134" width="210" height="708" rx="12" fill="#f5f8fc" stroke="#d7e0ed"/>
+  <text x="82" y="174" class="h2">分类</text>
+  <g transform="translate(82 204)">
+    <rect width="150" height="38" rx="8" fill="#2f67f6"/>
+    <text x="42" y="25" fill="#fff" font-family="Microsoft YaHei,Arial" font-size="15" font-weight="700">全部</text>
+    <text y="72" class="label">背景场景</text>
+    <text y="112" class="label">角色绿幕</text>
+    <text y="152" class="label">音频素材</text>
+    <text y="192" class="label">特效/道具</text>
+    <text y="232" class="label">字幕/贴纸</text>
+    <text y="292" class="small">收藏 12</text>
+    <text y="326" class="small">最近使用 24</text>
+  </g>
+
+  <rect x="292" y="134" width="836" height="708" rx="12" class="panel"/>
+  <rect x="322" y="164" width="520" height="44" rx="9" fill="#fff" stroke="#ccd8e7"/>
+  <text x="346" y="192" class="txt">搜索素材：委屈猫  有声  绿幕</text>
+  <rect x="856" y="164" width="104" height="44" rx="9" fill="#edf4ff" stroke="#bad1ff"/>
+  <text x="890" y="192" class="label" fill="#245fe8">筛选</text>
+  <rect x="976" y="164" width="122" height="44" rx="9" fill="#2f67f6"/>
+  <text x="1018" y="192" fill="#fff" font-family="Microsoft YaHei,Arial" font-size="15" font-weight="700">导入</text>
+
+  <g transform="translate(322 228)">
+    <rect width="90" height="34" rx="8" fill="#2f67f6"/>
+    <text x="28" y="22" fill="#fff" font-family="Microsoft YaHei,Arial" font-size="14" font-weight="700">全部</text>
+    <rect x="104" width="108" height="34" rx="8" fill="#fff" stroke="#ccd8e7"/>
+    <text x="134" y="22" class="small">有声</text>
+    <rect x="226" width="108" height="34" rx="8" fill="#fff" stroke="#ccd8e7"/>
+    <text x="256" y="22" class="small">无声</text>
+    <rect x="348" width="128" height="34" rx="8" fill="#fff" stroke="#ccd8e7"/>
+    <text x="378" y="22" class="small">最近使用</text>
+    <rect x="490" width="108" height="34" rx="8" fill="#fff" stroke="#ccd8e7"/>
+    <text x="520" y="22" class="small">收藏</text>
+  </g>
+
+  <g transform="translate(322 288)">
+    <text class="h3">角色绿幕 24 个</text>
+    <text x="636" class="small">第 1 / 1 页 · 只渲染可见卡片</text>
+    <g transform="translate(0 26)">
+      <rect width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="14" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="90" cy="68" rx="45" ry="38" fill="#d1a17c"/>
+      <text x="16" y="148" class="h3">委屈猫哭泣</text>
+      <text x="16" y="174" class="small">视频 · 30s · 有声</text>
+      <rect x="194" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="208" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="284" cy="68" rx="36" ry="44" fill="#9a7b62"/>
+      <text x="210" y="148" class="h3">摇摇猫</text>
+      <text x="210" y="174" class="small">视频 · 30s</text>
+      <rect x="388" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="402" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="478" cy="68" rx="48" ry="36" fill="#c9a27c"/>
+      <text x="404" y="148" class="h3">抱头猫</text>
+      <text x="404" y="174" class="small">视频 · 8s</text>
+      <rect x="582" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="596" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="672" cy="68" rx="44" ry="40" fill="#b48c6b"/>
+      <text x="598" y="148" class="h3">震惊猫</text>
+      <text x="598" y="174" class="small">视频 · 有声</text>
+    </g>
+    <g transform="translate(0 240)">
+      <rect width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="14" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="90" cy="68" rx="42" ry="35" fill="#ae8060"/>
+      <text x="16" y="148" class="h3">疑惑猫</text>
+      <text x="16" y="174" class="small">视频 · 12s</text>
+      <rect x="194" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="208" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="284" cy="68" rx="45" ry="32" fill="#d2b48c"/>
+      <text x="210" y="148" class="h3">趴桌猫</text>
+      <text x="210" y="174" class="small">视频 · 30s</text>
+      <rect x="388" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="402" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="478" cy="68" rx="38" ry="46" fill="#776455"/>
+      <text x="404" y="148" class="h3">回头猫</text>
+      <text x="404" y="174" class="small">视频 · 30s</text>
+      <rect x="582" width="180" height="192" rx="12" class="subpanel"/>
+      <rect x="596" y="14" width="152" height="106" rx="10" fill="url(#checker2)"/>
+      <ellipse cx="672" cy="68" rx="48" ry="34" fill="#c1845d"/>
+      <text x="598" y="148" class="h3">指指点点猫</text>
+      <text x="598" y="174" class="small">视频 · 有声</text>
+    </g>
+  </g>
+
+  <rect x="1152" y="134" width="290" height="708" rx="12" class="panel"/>
+  <text x="1180" y="174" class="h2">素材详情</text>
+  <rect x="1180" y="204" width="234" height="150" rx="12" fill="url(#checker2)" stroke="#d7e0ed"/>
+  <ellipse cx="1297" cy="278" rx="58" ry="44" fill="#d1a17c"/>
+  <text x="1180" y="390" class="h3">委屈猫哭泣</text>
+  <text x="1180" y="420" class="txt">类型：视频 · 30s · 有声</text>
+  <text x="1180" y="448" class="txt">标签：绿幕、热门常用、抠像素材</text>
+  <rect x="1180" y="480" width="234" height="44" rx="9" fill="#2f67f6"/>
+  <text x="1246" y="508" fill="#fff" font-family="Microsoft YaHei,Arial" font-size="15" font-weight="700">投放到当前帧</text>
+  <rect x="1180" y="540" width="108" height="40" rx="9" fill="#edf4ff" stroke="#bad1ff"/>
+  <text x="1210" y="566" class="label" fill="#245fe8">收藏</text>
+  <rect x="1306" y="540" width="108" height="40" rx="9" fill="#fff" stroke="#ccd8e7"/>
+  <text x="1336" y="566" class="label">预览</text>
+  <rect x="1180" y="616" width="234" height="136" rx="12" fill="#f8fafd" stroke="#dce5f0"/>
+  <text x="1200" y="648" class="label">投放规则</text>
+  <text x="1200" y="678" class="small">绿幕素材 → 角色轨道</text>
+  <text x="1200" y="704" class="small">背景素材 → 最底层背景轨道</text>
+  <text x="1200" y="730" class="small">开始帧 → 当前播放头</text>
+</svg>

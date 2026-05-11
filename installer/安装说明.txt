@@ -1,0 +1,15 @@
+Cat Meme Studio 全量离线包
+
+使用方式：
+1. 先完整解压这个 ZIP，不要直接在压缩包预览窗口里运行。
+2. 推荐双击 Install-CatMemeStudio.cmd 安装到当前用户目录，并创建桌面/开始菜单快捷方式。
+3. 也可以直接双击 Cat Meme Studio.exe 免安装运行。
+
+素材说明：
+- 本包已包含打包时 assets 目录下的全部素材。
+- 内置素材位于 resources\seed-assets，应用会自动显示，无需手动导入。
+- 用户后续导入、下载、生成的素材仍会保存到工作区，例如 D:\cat_meme\assets。
+
+卸载方式：
+- 删除 %LOCALAPPDATA%\Programs\Cat Meme Studio。
+- 如需删除个人工程、导出视频和后续导入素材，再手动删除 D:\cat_meme 或 文档\cat_meme。

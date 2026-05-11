@@ -1,0 +1,17 @@
+node_modules
+out
+release
+release-full
+dist
+.vite
+*.log
+*.tsbuildinfo
+assets/**/*
+projects/**/*
+output/**/*
+data/**/*
+资源/**/*
+!assets/.gitkeep
+!projects/.gitkeep
+!output/.gitkeep
+!data/.gitkeep

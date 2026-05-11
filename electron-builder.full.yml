@@ -1,0 +1,27 @@
+appId: com.catmeme.studio
+productName: Cat Meme Studio
+directories:
+  output: release-full
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: assets
+    to: seed-assets
+  - from: data/assets.index.json
+    to: seed-data/assets.index.json
+extraFiles:
+  - from: installer/Install-CatMemeStudio.cmd
+    to: Install-CatMemeStudio.cmd
+  - from: installer/Install-CatMemeStudio.ps1
+    to: Install-CatMemeStudio.ps1
+  - from: installer/安装说明.txt
+    to: 安装说明.txt
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+compression: normal
+win:
+  signAndEditExecutable: false
+  target:
+    - zip
+  artifactName: ${productName}-${version}-full-offline-${arch}.${ext}
