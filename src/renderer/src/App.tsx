@@ -602,6 +602,12 @@ function App(): JSX.Element {
     if (!project) return
     const visualTracks = project.tracks.filter((track) => track.kind === 'visual')
     if (purpose === 'background') {
+      if (!isBackgroundAsset(asset) && isCharacterLikeAsset(asset)) {
+        const track = trackByGroupKind(project, 'role', 'visual')
+        if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
+        setNotice('这是角色/绿幕素材，已自动放入角色轨')
+        return
+      }
       const track = project.tracks.find((item) => item.id === backgroundTrackId(project)) || visualTracks[0]
       if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
       return
@@ -620,7 +626,16 @@ function App(): JSX.Element {
 
   function addAssetToTimelineAt(asset: Asset, trackId: string, startFrame: number, transformOverride?: Partial<ReturnType<typeof normalizeTransform>>): void {
     if (!project || !currentPreset) return
-    const resolvedTrackId = isBackgroundAsset(asset) ? backgroundTrackId(project) : trackId
+    const requestedTrack = project.tracks.find((track) => track.id === trackId)
+    const requestedGroup = trackGroupId(requestedTrack)
+    const targetGroup = isVisualAsset(asset) ? visualTargetGroupForAsset(asset) : null
+    const resolvedTrackId = targetGroup
+      ? targetGroup === 'background'
+        ? backgroundTrackId(project)
+        : requestedTrack?.kind === 'visual' && requestedGroup !== 'background' && canPlaceAssetOnTrack(asset, requestedTrack.kind)
+          ? trackId
+          : trackByGroupKind(project, targetGroup, 'visual')?.id || trackId
+      : trackId
     const track = project.tracks.find((track) => track.id === resolvedTrackId)
     if (!track) return
     if (track.locked) {
@@ -3013,7 +3028,7 @@ function KeyedMediaCanvas({
       const media = asset.type === 'video' ? videoRef.current : imageRef.current
       if (canvas && media && mediaReady(media)) {
         const bounds = drawKeyedFrame(canvas, media, keying)
-        onVisibleBounds(bounds || { left: 0.49, top: 0.49, width: 0.02, height: 0.02 })
+        onVisibleBounds(bounds && isUsefulForegroundBounds(bounds) ? bounds : { left: 0, top: 0, width: 1, height: 1 })
       }
       frame = window.requestAnimationFrame(draw)
     }
@@ -4411,6 +4426,9 @@ function normalizeCustomPreset(preset?: ExportPreset): ExportPreset {
 function normalizeProject(project: ProjectFile): ProjectFile {
   const tracks = normalizeProjectTracks(project.tracks || [])
   const normalizedAssets = normalizeAssets(project.assets || [])
+  const assetsById = new Map(normalizedAssets.map((asset) => [asset.id, asset]))
+  const roleTrackId = tracks.find((track) => track.kind === 'visual' && trackGroupId(track) === 'role')?.id
+  const projectForDefaults = { ...project, tracks, assets: normalizedAssets, timeline: project.timeline || [] }
   const subtitleStyle = normalizeSubtitleStyleConfig(upgradeLegacySubtitleStyle(project.subtitleStyle))
   const fallbackRoles = createStarterRoles(tracks)
   const roles = (project.roles?.length ? project.roles : fallbackRoles).map((role, index) => ({
@@ -4424,15 +4442,26 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     speakerPosition: role.speakerPosition || 'bottom',
     subtitlePosition: role.subtitlePosition || 'top'
   }))
-  const timeline = project.timeline.map((item) =>
-    item.type === 'subtitle'
-      ? {
-          ...item,
-          speakerPosition: item.speakerPosition || 'bottom',
-          style: item.style ? normalizeSubtitleStyleConfig({ ...subtitleStyle, ...upgradeLegacySubtitleStyle(item.style) }) : subtitleStyle
-        }
-      : item
-  )
+  const timeline = project.timeline.map((item) => {
+    const normalizedItem =
+      item.type === 'subtitle'
+        ? {
+            ...item,
+            speakerPosition: item.speakerPosition || 'bottom',
+            style: item.style ? normalizeSubtitleStyleConfig({ ...subtitleStyle, ...upgradeLegacySubtitleStyle(item.style) }) : subtitleStyle
+          }
+        : item
+    const asset = normalizedItem.assetId ? assetsById.get(normalizedItem.assetId) : undefined
+    const track = tracks.find((entry) => entry.id === normalizedItem.trackId)
+    if (normalizedItem.type === 'visual' && asset && roleTrackId && trackGroupId(track) === 'background' && isCharacterLikeAsset(asset)) {
+      return {
+        ...normalizedItem,
+        trackId: roleTrackId,
+        transform: defaultTransformForAsset(projectForDefaults, asset, roleTrackId)
+      }
+    }
+    return normalizedItem
+  })
   return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline }
 }
 
@@ -4897,7 +4926,7 @@ function trackIdForVisualAsset(project: ProjectFile, asset: Asset, selectedItem:
   const bottomTrackId = backgroundTrackId(project)
   if (isBackgroundAsset(asset)) return bottomTrackId
   if (selectedItem?.type === 'visual' && selectedItem.trackId !== bottomTrackId) return selectedItem.trackId
-  const targetGroup: TrackGroupId = assetMatchesPrimaryCategory(asset, 'props') || assetMatchesPrimaryCategory(asset, 'sticker') ? 'effect' : 'role'
+  const targetGroup = visualTargetGroupForAsset(asset)
   return trackByGroupKind(project, targetGroup, 'visual')?.id || project.tracks.find((track) => track.kind === 'visual' && track.id !== bottomTrackId)?.id || project.tracks.find((track) => track.kind === 'visual')?.id || 'visual-main'
 }
 
@@ -4911,6 +4940,16 @@ function trackByGroupKind(project: ProjectFile, groupId: TrackGroupId, kind: Tra
 
 function isBackgroundAsset(asset: Asset): boolean {
   return isVisualAsset(asset) && assetMatchesPrimaryCategory(asset, 'background')
+}
+
+function isCharacterLikeAsset(asset: Asset): boolean {
+  return isVisualAsset(asset) && !isBackgroundAsset(asset) && (isGreenScreenAsset(asset) || assetMatchesPrimaryCategory(asset, 'character'))
+}
+
+function visualTargetGroupForAsset(asset: Asset): Extract<TrackGroupId, 'background' | 'role' | 'effect'> {
+  if (isBackgroundAsset(asset)) return 'background'
+  if (assetMatchesPrimaryCategory(asset, 'props') || assetMatchesPrimaryCategory(asset, 'sticker')) return 'effect'
+  return 'role'
 }
 
 function nextStartFrame(project: ProjectFile, trackId: string): number {
@@ -4954,8 +4993,8 @@ function defaultScaleForAsset(asset: Asset, groupId: TrackGroupId, preset?: Expo
     return clampNumber(targetHeight * aspect * canvasHeightOverWidth, 0.12, isLandscape ? 0.32 : 0.34)
   }
 
-  const targetHeight = isLandscape ? 0.52 : 0.38
-  return clampNumber(targetHeight * aspect * canvasHeightOverWidth, isLandscape ? 0.1 : 0.16, isLandscape ? 0.36 : 0.46)
+  const targetHeight = isGreenScreenAsset(asset) ? (isLandscape ? 0.58 : 0.52) : (isLandscape ? 0.48 : 0.38)
+  return clampNumber(targetHeight * aspect * canvasHeightOverWidth, isLandscape ? 0.12 : 0.18, isLandscape ? 0.42 : 0.68)
 }
 
 function splitVisualKeyframesAtFrame(item: TimelineItem, localFrame: number): { first?: VisualKeyframe[]; second?: VisualKeyframe[] } {
@@ -5230,6 +5269,10 @@ function drawKeyedFrame(
   }
 }
 
+function isUsefulForegroundBounds(bounds: VisibleBounds): boolean {
+  return bounds.width >= 0.08 && bounds.height >= 0.08 && bounds.width * bounds.height >= 0.012
+}
+
 function detectFirstVisibleFrame(asset: Asset, fps: number, keying?: TimelineItem['keying']): Promise<number> {
   if (!asset.fileUrl || !['video', 'gif'].includes(asset.type)) return Promise.resolve(0)
   const normalizedKeying = normalizeKeying(keying)
@@ -5300,8 +5343,7 @@ function detectFirstVisibleFrame(asset: Asset, fps: number, keying?: TimelineIte
       canvas.width = 128
       canvas.height = Math.max(32, Math.round(128 / clampNumber(aspect, 0.2, 5)))
       const bounds = drawKeyedFrame(canvas, video, normalizedKeying)
-      const area = bounds ? bounds.width * bounds.height : 0
-      if (area > 0.002) {
+      if (bounds && isUsefulForegroundBounds(bounds)) {
         finish(Math.max(0, Math.round(video.currentTime * fps)))
       } else {
         seekNext()
@@ -5362,6 +5404,7 @@ function canMoveItemToTrack(project: ProjectFile, item: TimelineItem, trackId: s
   if (item.type === 'visual' && item.assetId) {
     const asset = project.assets.find((asset) => asset.id === item.assetId)
     if (asset && isBackgroundAsset(asset)) return track.id === backgroundTrackId(project)
+    if (asset && isCharacterLikeAsset(asset) && trackGroupId(track) === 'background') return false
   }
   return true
 }
