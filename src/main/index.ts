@@ -2,10 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } fr
 import { join } from 'node:path'
 import path from 'node:path'
 import { is } from '@electron-toolkit/utils'
-import type { AppSettings, CharacterRole, ProjectFile, TimelineTrack } from '../shared/types'
+import type { AppSettings, CharacterRole, GreenScreenPreprocessProgress, ProjectFile, TimelineTrack } from '../shared/types'
 import { CAT_MEME_TEMPLATES } from '../shared/templates'
 import { EXPORT_PRESETS } from '../shared/presets'
-import { downloadAsset, importLocalAsset, loadAssetIndex, searchAssets } from './assetService'
+import { downloadAsset, importLocalAsset, loadAssetIndex, preprocessGreenScreenAssets, searchAssets } from './assetService'
 import { generateScript, synthesizeTts } from './aiService'
 import { readJson, writeJson } from './jsonStore'
 import { renderProject } from './renderService'
@@ -107,6 +107,12 @@ function registerIpc(): void {
       imported.push(await importLocalAsset(info, filePath))
     }
     return imported
+  })
+  ipcMain.handle('asset.preprocessGreenScreen', async (_event, request) => {
+    const info = await ensureWorkspace()
+    return preprocessGreenScreenAssets(info, request, (progress: GreenScreenPreprocessProgress) => {
+      mainWindow?.webContents.send('asset.preprocessGreenScreenProgress', progress)
+    })
   })
 
   ipcMain.handle('ai.generateScript', async (_event, request) => generateScript(request, settings))

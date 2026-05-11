@@ -42,6 +42,7 @@ import type {
   AppSettings,
   Asset,
   AssetProvider,
+  GreenScreenPreprocessProgress,
   AssetSearchRequest,
   CatMemeTemplate,
   CharacterMemeState,
@@ -282,6 +283,7 @@ function App(): JSX.Element {
   const [rightTab, setRightTab] = useState<RightTab>('templates')
   const [preview, setPreview] = useState<RenderResult | null>(null)
   const [lastExport, setLastExport] = useState<RenderResult | null>(null)
+  const [preprocessProgress, setPreprocessProgress] = useState<GreenScreenPreprocessProgress | null>(null)
   const [busy, setBusy] = useState<string | null>('启动中')
   const [notice, setNotice] = useState('正在初始化应用...')
   const [aiTopic, setAiTopic] = useState('猫猫上班第一天就想离职')
@@ -290,6 +292,13 @@ function App(): JSX.Element {
 
   useEffect(() => {
     void boot()
+  }, [])
+
+  useEffect(() => {
+    return window.catMeme.onGreenScreenPreprocessProgress((progress) => {
+      setPreprocessProgress(progress)
+      setNotice(`透明缓存：${progress.current}/${progress.total}，成功 ${progress.success}，跳过 ${progress.skipped}，失败 ${progress.failed}`)
+    })
   }, [])
 
   const currentPreset = useMemo(() => {
@@ -584,6 +593,31 @@ function App(): JSX.Element {
         setLocalAssets((current) => [...normalizedAssets, ...current])
         setNotice(`已导入 ${normalizedAssets.length} 个素材`)
       }
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function preprocessFilteredGreenScreenAssets(force = false): Promise<void> {
+    const assetIds = filteredLocalAssets.filter(isGreenScreenAsset).map((asset) => asset.id)
+    if (!assetIds.length) {
+      setNotice('当前筛选结果没有绿幕素材')
+      return
+    }
+    try {
+      setBusy('生成透明缓存')
+      setPreprocessProgress({ total: assetIds.length, current: 0, success: 0, skipped: 0, failed: 0, status: 'processing' })
+      const result = await window.catMeme.preprocessGreenScreen({
+        assetIds,
+        force,
+        keying: { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 }
+      })
+      const normalizedAssets = normalizeAssets(result.assets)
+      setLocalAssets(normalizedAssets)
+      setProject((current) => (current ? { ...current, assets: mergeAssets(current.assets, normalizedAssets), updatedAt: new Date().toISOString() } : current))
+      setNotice(`透明缓存完成：成功 ${result.success}，跳过 ${result.skipped}，失败 ${result.failed}`)
     } catch (error) {
       setNotice(errorText(error))
     } finally {
@@ -1659,6 +1693,9 @@ function App(): JSX.Element {
           viewMode={assetViewMode}
           onViewModeChange={setAssetViewMode}
           onImport={importLocalAssets}
+          onPreprocessGreen={() => preprocessFilteredGreenScreenAssets(false)}
+          onPreprocessGreenForce={() => preprocessFilteredGreenScreenAssets(true)}
+          preprocessProgress={preprocessProgress}
           onAdd={addAssetToTimeline}
           onAddToPurpose={addAssetToPurpose}
           onShowFile={(asset) => window.catMeme.showItem(asset.localPath)}
@@ -1766,6 +1803,7 @@ function App(): JSX.Element {
           </div>
           <Timeline
             project={project}
+            availableAssets={mergeAssets(project.assets, localAssets)}
             totalFrames={totalFrames}
             fps={currentPreset.fps}
             selectedItemId={selectedItemId}
@@ -1914,6 +1952,9 @@ function AssetLibraryPanel({
   viewMode,
   onViewModeChange,
   onImport,
+  onPreprocessGreen,
+  onPreprocessGreenForce,
+  preprocessProgress,
   onAdd,
   onAddToPurpose,
   onShowFile
@@ -1934,11 +1975,17 @@ function AssetLibraryPanel({
   viewMode: AssetViewMode
   onViewModeChange: (mode: AssetViewMode) => void
   onImport: () => Promise<void>
+  onPreprocessGreen: () => Promise<void>
+  onPreprocessGreenForce: () => Promise<void>
+  preprocessProgress: GreenScreenPreprocessProgress | null
   onAdd: (asset: Asset, trackKind?: TrackKind) => void
   onAddToPurpose: (asset: Asset, purpose: 'background' | 'role' | 'audio') => void
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const subcategories = ASSET_SUBCATEGORIES[primaryCategory] || ASSET_SUBCATEGORIES.all
+  const greenAssets = filteredLocalAssets.filter(isGreenScreenAsset)
+  const cachedGreenAssets = greenAssets.filter((asset) => Boolean(greenAlphaVariant(asset))).length
+  const preprocessing = Boolean(preprocessProgress && preprocessProgress.current < preprocessProgress.total)
 
   return (
     <aside className="left-panel asset-workbench">
@@ -1987,7 +2034,20 @@ function AssetLibraryPanel({
             <Upload size={15} />
             导入
           </button>
+          <button className="command compact" disabled={!greenAssets.length || preprocessing} onClick={onPreprocessGreen}>
+            <Sparkles size={15} />
+            透明缓存
+          </button>
         </div>
+        {greenAssets.length > 0 && (
+          <div className="asset-preprocess-row">
+            <span>绿幕缓存 {cachedGreenAssets}/{greenAssets.length}</span>
+            <button className="mini-link" disabled={preprocessing} onClick={onPreprocessGreenForce}>
+              重新生成
+            </button>
+            {preprocessProgress && <small>{preprocessProgress.current}/{preprocessProgress.total}</small>}
+          </div>
+        )}
       </div>
 
       <div className="asset-browser">
@@ -2150,7 +2210,6 @@ function LocalAssetCard({
     >
       <div className="asset-thumb-wrap">
         <MemoAssetThumbnail asset={asset} active={previewActive} />
-        <span className="asset-type-badge">{assetTypeName(asset.type)}</span>
       </div>
       <div className="asset-meta">
         <strong>{asset.title || asset.filename}</strong>
@@ -2537,7 +2596,19 @@ function RoleStateEditor({
   )
 }
 
-function MediaThumb({ src, type }: { src?: string; type: string }): JSX.Element {
+function MediaThumb({ src, type, active = false }: { src?: string; type: string; active?: boolean }): JSX.Element {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || type !== 'video') return
+    if (active) {
+      video.currentTime = Math.min(video.currentTime || 0, Number.isFinite(video.duration) ? video.duration : 0)
+      void video.play().catch(() => undefined)
+    } else {
+      video.pause()
+      if (Number.isFinite(video.duration)) video.currentTime = 0
+    }
+  }, [active, src, type])
   if (!src) {
     return (
       <div className="thumb empty">
@@ -2545,7 +2616,8 @@ function MediaThumb({ src, type }: { src?: string; type: string }): JSX.Element 
       </div>
     )
   }
-  if (type === 'video') return <video className="thumb" src={src} muted preload="metadata" />
+  if (type === 'video') return <video ref={videoRef} className="thumb" src={src} muted loop playsInline preload={active ? 'auto' : 'metadata'} />
+  if (type === 'gif') return <GifThumb src={src} active={active} />
   if (type === 'audio') {
     return (
       <div className="thumb empty">
@@ -2556,20 +2628,53 @@ function MediaThumb({ src, type }: { src?: string; type: string }): JSX.Element 
   return <img className="thumb" src={src} alt="" loading="lazy" decoding="async" />
 }
 
+function GifThumb({ src, active }: { src: string; active: boolean }): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+
+  function drawStill(): void {
+    const canvas = canvasRef.current
+    const image = imageRef.current
+    if (!canvas || !image || !mediaReady(image)) return
+    const context = canvas.getContext('2d')
+    if (!context) return
+    canvas.width = 360
+    canvas.height = 220
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    const scale = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight)
+    const width = image.naturalWidth * scale
+    const height = image.naturalHeight * scale
+    context.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height)
+  }
+
+  useEffect(() => {
+    const timer = window.setTimeout(drawStill, 80)
+    return () => window.clearTimeout(timer)
+  }, [src])
+
+  if (active) return <img className="thumb" src={src} alt="" loading="lazy" decoding="async" />
+
+  return (
+    <div className="thumb green-thumb">
+      <canvas ref={canvasRef} />
+      <img ref={imageRef} className="thumb-source" src={src} alt="" loading="lazy" decoding="async" onLoad={drawStill} />
+    </div>
+  )
+}
+
 function AssetThumbnail({ asset, active = false }: { asset: Asset; active?: boolean }): JSX.Element {
+  const alphaVariant = greenAlphaVariant(asset)
+  if (alphaVariant?.fileUrl) {
+    return <MediaThumb src={alphaVariant.fileUrl} type={alphaVariant.format === 'png' ? 'image' : 'video'} active={active} />
+  }
   if (asset.fileUrl && asset.type !== 'audio' && isGreenScreenAsset(asset)) {
     if (!active) {
-      return (
-        <div className="thumb empty green-thumb-placeholder">
-          <Film size={20} />
-          <span>Green</span>
-        </div>
-      )
+      return <MediaThumb src={asset.fileUrl} type={asset.type} />
     }
     if (asset.type === 'video') return <GreenScreenVideoThumb asset={asset} />
     return <GreenScreenAssetThumb asset={asset} />
   }
-  return <MediaThumb src={asset.fileUrl} type={asset.type} />
+  return <MediaThumb src={asset.fileUrl} type={asset.type} active={active} />
 }
 
 function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
@@ -2605,6 +2710,8 @@ function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
     } catch {
       draw()
     }
+    media.loop = true
+    void media.play().catch(() => undefined)
   }
 
   useEffect(() => {
@@ -2806,10 +2913,14 @@ function QuickPreviewLayer({
   } | null>(null)
   const [mediaSize, setMediaSize] = useState(() => mediaCanvasSize(asset))
   const [visibleBounds, setVisibleBounds] = useState<VisibleBounds>({ left: 0, top: 0, width: 1, height: 1 })
+  const alphaVariant = greenAlphaVariant(asset)
+  const mediaSrc = alphaVariant?.fileUrl || asset.fileUrl
+  const mediaType = alphaVariant?.format === 'png' ? 'image' : alphaVariant?.format === 'webm' ? 'video' : asset.type
   const localFrame = localFrameForItem(item, playheadFrame)
   const currentSeconds = mediaPlaybackSeconds(item, asset, localFrame, fps)
   const transform = visualTransformAtFrame(item, localFrame)
   const keying = normalizeKeying(item.keying)
+  const shouldKey = keying.enabled && !alphaVariant
   const style = previewLayerStyle(item, asset, transform, presetWidth, presetHeight, mediaSize)
 
   useEffect(() => {
@@ -2817,8 +2928,8 @@ function QuickPreviewLayer({
   }, [asset.id, asset.type, asset.width, asset.height])
 
   useEffect(() => {
-    if (!keying.enabled) setVisibleBounds({ left: 0, top: 0, width: 1, height: 1 })
-  }, [keying.enabled, asset.id])
+    if (!shouldKey) setVisibleBounds({ left: 0, top: 0, width: 1, height: 1 })
+  }, [shouldKey, asset.id])
 
   const updateVisibleBounds = useCallback((bounds: VisibleBounds) => {
     setVisibleBounds((current) => {
@@ -2874,7 +2985,7 @@ function QuickPreviewLayer({
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video || asset.type !== 'video') return
+    if (!video || mediaType !== 'video') return
     if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
       video.currentTime = Math.max(0, currentSeconds)
     }
@@ -2883,10 +2994,11 @@ function QuickPreviewLayer({
     } else {
       video.pause()
     }
-  }, [asset.type, currentSeconds, isPlaying])
+  }, [currentSeconds, isPlaying, mediaType])
 
   let content: JSX.Element | null = null
-  if (keying.enabled && ['image', 'video', 'gif'].includes(asset.type)) {
+  if (!mediaSrc) return <></>
+  if (shouldKey && ['image', 'video', 'gif'].includes(asset.type)) {
     content = (
       <KeyedMediaCanvas
         asset={asset}
@@ -2897,10 +3009,10 @@ function QuickPreviewLayer({
         onVisibleBounds={updateVisibleBounds}
       />
     )
-  } else if (asset.type === 'video') {
-    content = <video ref={videoRef} src={asset.fileUrl} muted playsInline preload="auto" onLoadedMetadata={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
-  } else if (['image', 'gif'].includes(asset.type)) {
-    content = <img src={asset.fileUrl} alt="" loading="lazy" decoding="async" onLoad={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
+  } else if (mediaType === 'video') {
+    content = <video ref={videoRef} src={mediaSrc} muted playsInline preload="auto" onLoadedMetadata={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
+  } else if (['image', 'gif'].includes(mediaType)) {
+    content = <img src={mediaSrc} alt="" loading="lazy" decoding="async" onLoad={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
   }
 
   if (!content) return <></>
@@ -3341,6 +3453,7 @@ function ProjectOverviewInspector({
 
 function Timeline({
   project,
+  availableAssets,
   totalFrames,
   fps,
   selectedItemId,
@@ -3372,6 +3485,7 @@ function Timeline({
   onDropAsset
 }: {
   project: ProjectFile
+  availableAssets: Asset[]
   totalFrames: number
   fps: number
   selectedItemId: string | null
@@ -3414,6 +3528,13 @@ function Timeline({
   } | null>(null)
   const [durationDrag, setDurationDrag] = useState<{ startX: number; startFrames: number; laneWidth: number } | null>(null)
   const [trackDropTarget, setTrackDropTarget] = useState<string | null>(null)
+  const [assetDropPreview, setAssetDropPreview] = useState<{
+    trackId: string
+    frame: number
+    durationFrames: number
+    valid: boolean
+    label?: string
+  } | null>(null)
   const rulerTicks = makeRulerTicks(totalFrames, fps)
   const visibleGroups = activeGroup === 'all' ? TRACK_GROUPS : TRACK_GROUPS.filter((group) => group.id === activeGroup)
 
@@ -3543,12 +3664,74 @@ function Timeline({
     setTrackDropTarget(null)
   }
 
+  function assetIdFromDrag(event: DragEvent<HTMLElement>): string {
+    return event.dataTransfer.getData('application/x-cat-meme-asset') || event.dataTransfer.getData('text/plain')
+  }
+
+  function assetDropDuration(asset: Asset): number {
+    const seconds = asset.type === 'audio' ? asset.duration || 4 : asset.duration || 2.4
+    return Math.max(fps, Math.round(seconds * fps))
+  }
+
+  function assetDropFrame(rawFrame: number, durationFrames: number, trackId: string, altKey: boolean, laneWidth: number): { frame: number; label?: string } {
+    const safeFrame = clampNumber(rawFrame, 0, Math.max(0, totalFrames - 1))
+    if (!snapEnabled || altKey) return { frame: safeFrame }
+    const trackItems = project.timeline.filter((item) => item.trackId === trackId)
+    const candidates = [
+      { frame: playheadFrame, label: '播放头' },
+      ...trackItems.flatMap((item) => [
+        { frame: item.startFrame, label: '后一个开头' },
+        { frame: item.startFrame + item.durationFrames, label: '前一个结尾' },
+        { frame: item.startFrame - durationFrames, label: '贴齐前一个开头' }
+      ])
+    ]
+    const threshold = snapThresholdFrames(laneWidth, totalFrames, fps)
+    let winner: { frame: number; label?: string } | null = null
+    let distance = threshold + 1
+    candidates.forEach((candidate) => {
+      const nextDistance = Math.abs(candidate.frame - safeFrame)
+      if (candidate.frame >= 0 && nextDistance <= threshold && nextDistance < distance) {
+        winner = candidate
+        distance = nextDistance
+      }
+    })
+    return winner || { frame: safeFrame }
+  }
+
+  function updateAssetDropPreview(event: DragEvent<HTMLDivElement>, track: TimelineTrack): void {
+    if (dragHasType(event, TRACK_DRAG_MIME)) return
+    const assetId = assetIdFromDrag(event)
+    if (!assetId) return
+    const asset = availableAssets.find((item) => item.id === assetId)
+    if (!asset) return
+    event.preventDefault()
+    const rawFrame = frameFromClientX(event.currentTarget, event.clientX)
+    const durationFrames = assetDropDuration(asset)
+    const snap = assetDropFrame(rawFrame, durationFrames, track.id, event.altKey, event.currentTarget.getBoundingClientRect().width)
+    setAssetDropPreview({
+      trackId: track.id,
+      frame: snap.frame,
+      durationFrames,
+      valid: canDropAssetOnTimelineTrack(project, asset, track),
+      label: snap.label
+    })
+    event.dataTransfer.dropEffect = track.locked || !canDropAssetOnTimelineTrack(project, asset, track) ? 'none' : 'copy'
+  }
+
   function handleAssetDrop(event: DragEvent<HTMLDivElement>, trackId: string): void {
     event.preventDefault()
-    if (project.tracks.find((track) => track.id === trackId)?.locked) return
-    const assetId = event.dataTransfer.getData('application/x-cat-meme-asset') || event.dataTransfer.getData('text/plain')
+    const track = project.tracks.find((track) => track.id === trackId)
+    if (!track?.id || track.locked) return
+    const assetId = assetIdFromDrag(event)
     if (!assetId) return
-    onDropAsset(assetId, trackId, playheadFrame)
+    const asset = availableAssets.find((item) => item.id === assetId)
+    if (!asset || !canDropAssetOnTimelineTrack(project, asset, track)) {
+      setAssetDropPreview(null)
+      return
+    }
+    const frame = assetDropPreview?.trackId === trackId ? assetDropPreview.frame : frameFromClientX(event.currentTarget, event.clientX)
+    onDropAsset(assetId, trackId, frame)
+    setAssetDropPreview(null)
   }
 
   function beginDrag(event: PointerEvent<HTMLElement>, item: TimelineItem, mode: 'move' | 'trim-start' | 'trim-end'): void {
@@ -3593,7 +3776,7 @@ function Timeline({
 
   return (
     <div
-      className={razorMode ? 'timeline razor-mode' : 'timeline'}
+      className={`timeline ${razorMode ? 'razor-mode' : ''} ${dragState ? 'dragging-item' : ''}`}
       onWheel={(event) => {
         if (!event.ctrlKey) return
         event.preventDefault()
@@ -3730,8 +3913,10 @@ function Timeline({
                       }}
                       onDragOver={(event) => {
                         if (dragHasType(event, TRACK_DRAG_MIME)) return
-                        event.preventDefault()
-                        event.dataTransfer.dropEffect = track.locked ? 'none' : 'copy'
+                        updateAssetDropPreview(event, track)
+                      }}
+                      onDragLeave={() => {
+                        setAssetDropPreview((current) => (current?.trackId === track.id ? null : current))
                       }}
                       onDrop={(event) => {
                         if (dragHasType(event, TRACK_DRAG_MIME)) return
@@ -3739,6 +3924,17 @@ function Timeline({
                       }}
                     >
                       <div className="track-playhead" style={{ left: `${(playheadFrame / totalFrames) * 100}%` }} />
+                      {assetDropPreview?.trackId === track.id && (
+                        <>
+                          <div className={assetDropPreview.valid ? 'timeline-drop-ghost' : 'timeline-drop-ghost invalid'} style={{
+                            left: `${(assetDropPreview.frame / totalFrames) * 100}%`,
+                            width: `${Math.max(1.2, (assetDropPreview.durationFrames / totalFrames) * 100)}%`
+                          }}>
+                            {assetDropPreview.valid ? assetDropPreview.label || '投放' : '不可投放'}
+                          </div>
+                          <div className={assetDropPreview.valid ? 'timeline-snap-preview' : 'timeline-snap-preview invalid'} style={{ left: `${(assetDropPreview.frame / totalFrames) * 100}%` }} />
+                        </>
+                      )}
                       {items.map((item) => (
                         <button
                           type="button"
@@ -5205,6 +5401,10 @@ function isGreenScreenAsset(asset: Asset): boolean {
   return haystack.includes('绿幕') || haystack.includes('green') || haystack.includes('chroma')
 }
 
+function greenAlphaVariant(asset: Asset): NonNullable<Asset['processedVariants']>[number] | undefined {
+  return asset.processedVariants?.find((variant) => variant.kind === 'green-alpha' && Boolean(variant.fileUrl || variant.localPath))
+}
+
 function mediaReady(media: HTMLVideoElement | HTMLImageElement): boolean {
   if (media instanceof HTMLVideoElement) return media.readyState >= 2 && media.videoWidth > 0 && media.videoHeight > 0
   return media.complete && media.naturalWidth > 0 && media.naturalHeight > 0
@@ -5401,12 +5601,22 @@ function findPreviewAudioItems(project: ProjectFile | null, frame: number, soloG
 function canMoveItemToTrack(project: ProjectFile, item: TimelineItem, trackId: string): boolean {
   const track = project.tracks.find((track) => track.id === trackId)
   if (!track || track.locked || track.kind !== item.type) return false
-  if (item.type === 'visual' && item.assetId) {
+  if (item.assetId) {
     const asset = project.assets.find((asset) => asset.id === item.assetId)
-    if (asset && isBackgroundAsset(asset)) return track.id === backgroundTrackId(project)
-    if (asset && isCharacterLikeAsset(asset) && trackGroupId(track) === 'background') return false
+    if (asset) return canDropAssetOnTimelineTrack(project, asset, track)
   }
   return true
+}
+
+function canDropAssetOnTimelineTrack(project: ProjectFile, asset: Asset, track: TimelineTrack): boolean {
+  if (track.locked || !canPlaceAssetOnTrack(asset, track.kind)) return false
+  if (track.kind !== 'visual') return true
+  const groupId = trackGroupId(track)
+  const targetGroup = visualTargetGroupForAsset(asset)
+  if (targetGroup === 'background') return groupId === 'background'
+  if (targetGroup === 'role') return groupId === 'role'
+  if (targetGroup === 'effect') return groupId === 'effect'
+  return false
 }
 
 function displayTrackName(track: TimelineTrack): string {

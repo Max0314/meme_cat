@@ -13,6 +13,20 @@ export type AssetType = 'image' | 'video' | 'audio' | 'gif' | 'font'
 
 export type RiskLevel = 'safe' | 'medium' | 'high'
 
+export interface AssetProcessedVariant {
+  kind: 'green-alpha'
+  format: 'webm' | 'png'
+  localPath: string
+  sourceMtimeMs?: number
+  sourceSize?: number
+  keying: Partial<VisualKeying>
+  createdAt: string
+  width?: number
+  height?: number
+  duration?: number
+  fileUrl?: string
+}
+
 export interface Asset {
   id: string
   type: AssetType
@@ -30,6 +44,7 @@ export interface Asset {
   height?: number
   createdAt: string
   fileUrl?: string
+  processedVariants?: AssetProcessedVariant[]
 }
 
 export interface RemoteAssetResult {
@@ -66,6 +81,32 @@ export interface AssetSearchResponse {
 
 export interface DownloadAssetRequest {
   result: RemoteAssetResult
+}
+
+export interface GreenScreenPreprocessRequest {
+  assetIds: string[]
+  force?: boolean
+  keying?: Partial<VisualKeying>
+}
+
+export interface GreenScreenPreprocessProgress {
+  total: number
+  current: number
+  success: number
+  skipped: number
+  failed: number
+  status: 'processing' | 'done' | 'skipped' | 'failed'
+  assetId?: string
+  filename?: string
+  message?: string
+}
+
+export interface GreenScreenPreprocessResult {
+  assets: Asset[]
+  success: number
+  skipped: number
+  failed: number
+  errors: Array<{ assetId: string; filename: string; message: string }>
 }
 
 export type TrackKind = 'visual' | 'subtitle' | 'voice' | 'music' | 'sfx'

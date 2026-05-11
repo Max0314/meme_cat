@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { pathToFileURL } from 'node:url'
 import type {
   AiScriptRequest,
@@ -10,6 +10,9 @@ import type {
   CatMemeTemplate,
   DownloadAssetRequest,
   ExportPreset,
+  GreenScreenPreprocessProgress,
+  GreenScreenPreprocessRequest,
+  GreenScreenPreprocessResult,
   ProjectFile,
   RenderRequest,
   RenderResult,
@@ -28,6 +31,13 @@ const api = {
   searchAssets: (request: AssetSearchRequest): Promise<AssetSearchResponse> => ipcRenderer.invoke('asset.search', request),
   downloadAsset: (request: DownloadAssetRequest): Promise<Asset> => ipcRenderer.invoke('asset.download', request),
   importLocalAssets: (): Promise<Asset[]> => ipcRenderer.invoke('asset.importLocal'),
+  preprocessGreenScreen: (request: GreenScreenPreprocessRequest): Promise<GreenScreenPreprocessResult> =>
+    ipcRenderer.invoke('asset.preprocessGreenScreen', request),
+  onGreenScreenPreprocessProgress: (callback: (progress: GreenScreenPreprocessProgress) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, progress: GreenScreenPreprocessProgress): void => callback(progress)
+    ipcRenderer.on('asset.preprocessGreenScreenProgress', listener)
+    return () => ipcRenderer.removeListener('asset.preprocessGreenScreenProgress', listener)
+  },
   generateScript: (request: AiScriptRequest) => ipcRenderer.invoke('ai.generateScript', request),
   tts: (request: AiTtsRequest): Promise<Asset> => ipcRenderer.invoke('ai.tts', request),
   renderPreview: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.preview', request),

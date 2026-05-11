@@ -1,15 +1,17 @@
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import ffmpegStaticPath from 'ffmpeg-static'
-import type { Asset, ExportPreset, ProjectFile, RenderRequest, RenderResult, TimelineItem, VisualKeying, VisualTransform, WorkspaceInfo } from '../shared/types'
+import type { Asset, AssetProcessedVariant, ExportPreset, ProjectFile, RenderRequest, RenderResult, TimelineItem, VisualKeying, VisualTransform, WorkspaceInfo } from '../shared/types'
 
 interface VisualSegment {
   inputIndex: number
   durationSeconds: number
   item: TimelineItem
   asset: Asset
+  alphaVariant?: AssetProcessedVariant
   mediaSize?: MediaSize
 }
 
@@ -96,14 +98,17 @@ async function buildFfmpegArgs(
     if (!asset?.localPath) continue
     const durationSeconds = framesToSeconds(item.durationFrames, preset.fps)
     const sourceInSeconds = sourceInSecondsForItem(item, asset, preset.fps)
+    const alphaVariant = findGreenAlphaVariant(asset)
+    const inputPath = alphaVariant?.localPath || asset.localPath
+    const inputType = alphaVariant?.format === 'png' ? 'image' : alphaVariant?.format === 'webm' ? 'video' : asset.type
 
-    if (asset.type === 'image') {
-      args.push('-loop', '1', '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
-    } else if (asset.type === 'gif') {
-      args.push('-ignore_loop', item.loop ? '0' : '1', '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
+    if (inputType === 'image') {
+      args.push('-loop', '1', '-t', durationSeconds.toFixed(3), '-i', inputPath)
+    } else if (inputType === 'gif') {
+      args.push('-ignore_loop', item.loop ? '0' : '1', '-t', durationSeconds.toFixed(3), '-i', inputPath)
     } else {
       if (item.loop) args.push('-stream_loop', '-1')
-      args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
+      args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', inputPath)
     }
 
     visualSegments.push({
@@ -111,10 +116,18 @@ async function buildFfmpegArgs(
       item,
       durationSeconds,
       asset,
-      mediaSize: asset.width && asset.height ? { width: asset.width, height: asset.height } : (await probeMediaSize(ffmpegPath, asset.localPath)) || undefined
+      alphaVariant,
+      mediaSize: alphaVariant?.width && alphaVariant.height ? { width: alphaVariant.width, height: alphaVariant.height } : asset.width && asset.height ? { width: asset.width, height: asset.height } : (await probeMediaSize(ffmpegPath, inputPath)) || undefined
     })
     if (asset.type === 'video' && (item.volume ?? 1) > 0 && (await hasAudioStream(ffmpegPath, asset.localPath))) {
-      audioSegments.push({ inputIndex, item, durationSeconds })
+      if (alphaVariant) {
+        if (item.loop) args.push('-stream_loop', '-1')
+        args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
+        audioSegments.push({ inputIndex: inputIndex + 1, item, durationSeconds })
+        inputIndex += 1
+      } else {
+        audioSegments.push({ inputIndex, item, durationSeconds })
+      }
     }
     inputIndex += 1
   }
@@ -198,7 +211,7 @@ async function buildFilterComplex(
 
       filters.push(
         `[${sourceLabel}]` +
-          buildVisualLayerFilters(segment.item, preset, scaledWidth, scaledHeight, chunkDurationSeconds, startSeconds, opacity, fitCanvas, chunk.transform, sourceStartSeconds).join(',') +
+          buildVisualLayerFilters(segment.item, preset, scaledWidth, scaledHeight, chunkDurationSeconds, startSeconds, opacity, fitCanvas, chunk.transform, sourceStartSeconds, Boolean(segment.alphaVariant)).join(',') +
           `[${overlayLabel}]`
       )
       filters.push(
@@ -563,6 +576,10 @@ function isBackgroundVisualSegment(segment: VisualSegment): boolean {
   )
 }
 
+function findGreenAlphaVariant(asset: Asset): AssetProcessedVariant | undefined {
+  return asset.processedVariants?.find((variant) => variant.kind === 'green-alpha' && existsSync(variant.localPath))
+}
+
 function mediaAspectRatio(asset: Asset, mediaSize?: MediaSize): number {
   const width = mediaSize?.width || asset.width
   const height = mediaSize?.height || asset.height
@@ -581,7 +598,8 @@ function buildVisualLayerFilters(
   opacity: string,
   fitCanvas: boolean,
   transformOverride?: VisualTransform,
-  sourceStartSeconds = 0
+  sourceStartSeconds = 0,
+  skipKeying = false
 ): string[] {
   const keying = normalizeKeying(item.keying)
   const transform = transformOverride || normalizeTransform(item.transform)
@@ -607,7 +625,7 @@ function buildVisualLayerFilters(
     filters.push(`rotate=${((transform.rotation * Math.PI) / 180).toFixed(6)}:ow=rotw(iw):oh=roth(ih):c=0x00000000`)
   }
 
-  if (keying.enabled) {
+  if (keying.enabled && !skipKeying) {
     filters.push(`chromakey=${keying.color}:${keying.similarity.toFixed(3)}:${keying.blend.toFixed(3)}`)
   }
 

@@ -3377,6 +3377,124 @@ body {
   color: #1d4ed8;
 }
 
+/* Asset preview and editor density refinements */
+.workspace-grid {
+  grid-template-columns: minmax(320px, 0.82fr) minmax(620px, 1.7fr) minmax(290px, 0.74fr);
+  gap: 10px;
+  padding: 10px 12px 12px;
+}
+
+.center-panel {
+  grid-template-rows: minmax(260px, 38vh) auto 24px minmax(260px, 1fr);
+  gap: 8px;
+  padding: 10px;
+}
+
+.left-panel,
+.right-panel {
+  padding: 10px;
+}
+
+.asset-library-head {
+  padding: 10px 12px;
+}
+
+.asset-toolbar {
+  gap: 6px;
+  padding: 9px 10px;
+}
+
+.asset-tool-row {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.asset-preprocess-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.asset-preprocess-row .mini-link {
+  min-height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.asset-type-badge {
+  display: none;
+}
+
+.asset-card.grid {
+  min-height: 168px;
+  padding: 7px;
+}
+
+.asset-card.list {
+  min-height: 74px;
+}
+
+.asset-meta strong {
+  font-size: 12px;
+}
+
+.preview-controls {
+  min-height: 42px;
+  padding: 6px 8px;
+}
+
+.quick-subtitle-bar {
+  min-height: 52px;
+  padding: 7px 8px;
+}
+
+.timeline.dragging-item .timeline-item {
+  pointer-events: none;
+}
+
+.timeline-drop-ghost {
+  position: absolute;
+  top: 6px;
+  z-index: 8;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 8px;
+  border: 1px dashed #38bdf8;
+  border-radius: 0;
+  background: rgba(37, 99, 235, 0.28);
+  color: #dbeafe;
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.timeline-drop-ghost.invalid {
+  border-color: #f87171;
+  background: rgba(127, 29, 29, 0.34);
+  color: #fecaca;
+}
+
+.timeline-snap-preview {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 9;
+  width: 2px;
+  background: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.18);
+  pointer-events: none;
+}
+
+.timeline-snap-preview.invalid {
+  background: #f87171;
+}
+
 .mini-link.active {
   border-color: #2563eb;
   background: #eaf1ff;

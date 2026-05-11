@@ -1,16 +1,22 @@
 import { existsSync } from 'node:fs'
 import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import ffmpegStaticPath from 'ffmpeg-static'
 import type {
   AppSettings,
   Asset,
   AssetProvider,
+  GreenScreenPreprocessProgress,
+  GreenScreenPreprocessRequest,
+  GreenScreenPreprocessResult,
   AssetSearchRequest,
   AssetSearchResponse,
   AssetType,
   DownloadAssetRequest,
   RemoteAssetResult,
+  VisualKeying,
   WorkspaceInfo
 } from '../shared/types'
 import { assetIndexPath } from './workspace'
@@ -86,7 +92,7 @@ export async function loadAssetIndex(info: WorkspaceInfo): Promise<Asset[]> {
 }
 
 export async function saveAssetIndex(info: WorkspaceInfo, assets: Asset[]): Promise<void> {
-  const serializable = assets.map(({ fileUrl: _fileUrl, ...asset }) => asset)
+  const serializable = assets.map(serializeAsset)
   await writeJson(assetIndexPath(info), serializable)
 }
 
@@ -132,9 +138,30 @@ function bundledAssetRelativePath(asset: Asset): string {
 }
 
 export function withFileUrl<T extends { localPath?: string }>(value: T): T & { fileUrl?: string } {
+  const variants = (value as { processedVariants?: Asset['processedVariants'] }).processedVariants
   return {
     ...value,
-    fileUrl: value.localPath ? pathToFileURL(value.localPath).toString() : undefined
+    fileUrl: value.localPath ? pathToFileURL(value.localPath).toString() : undefined,
+    ...(Array.isArray(variants)
+      ? {
+          processedVariants: variants.map((variant) => ({
+            ...variant,
+            fileUrl: pathToFileURL(variant.localPath).toString()
+          }))
+        }
+      : {})
+  }
+}
+
+function serializeAsset(asset: Asset): Asset {
+  const { fileUrl: _fileUrl, processedVariants, ...rest } = asset
+  return {
+    ...rest,
+    ...(processedVariants?.length
+      ? {
+          processedVariants: processedVariants.map(({ fileUrl: _variantFileUrl, ...variant }) => variant)
+        }
+      : {})
   }
 }
 
@@ -165,6 +192,86 @@ export async function importLocalAsset(info: WorkspaceInfo, filePath: string): P
   assets.unshift(asset)
   await saveAssetIndex(info, assets)
   return withFileUrl(asset)
+}
+
+export async function preprocessGreenScreenAssets(
+  info: WorkspaceInfo,
+  request: GreenScreenPreprocessRequest,
+  onProgress?: (progress: GreenScreenPreprocessProgress) => void
+): Promise<GreenScreenPreprocessResult> {
+  const assets = await loadAssetIndex(info)
+  const assetIds = Array.from(new Set(request.assetIds)).filter(Boolean)
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]))
+  const keying = normalizeGreenKeying(request.keying)
+  const ffmpegPath = resolveFfmpegPath()
+  const outputDir = path.join(info.assetsDir, 'processed', 'green-alpha')
+  await mkdir(outputDir, { recursive: true })
+
+  let success = 0
+  let skipped = 0
+  let failed = 0
+  const errors: GreenScreenPreprocessResult['errors'] = []
+
+  const emit = (progress: Omit<GreenScreenPreprocessProgress, 'total' | 'success' | 'skipped' | 'failed'>): void => {
+    onProgress?.({ total: assetIds.length, success, skipped, failed, ...progress })
+  }
+
+  for (let index = 0; index < assetIds.length; index += 1) {
+    const assetId = assetIds[index]
+    const asset = assetsById.get(assetId)
+    const current = index + 1
+    if (!asset) {
+      failed += 1
+      emit({ current, status: 'failed', assetId, filename: assetId, message: '素材不存在' })
+      errors.push({ assetId, filename: assetId, message: '素材不存在' })
+      continue
+    }
+
+    emit({ current, status: 'processing', assetId, filename: asset.filename })
+    try {
+      if (!isProcessableGreenAsset(asset)) {
+        skipped += 1
+        emit({ current, status: 'skipped', assetId, filename: asset.filename, message: '非绿幕视觉素材' })
+        continue
+      }
+
+      const sourceInfo = await stat(asset.localPath)
+      const existing = findValidGreenAlphaVariant(asset, keying, sourceInfo.size, sourceInfo.mtimeMs)
+      if (existing && !request.force) {
+        skipped += 1
+        emit({ current, status: 'skipped', assetId, filename: asset.filename, message: '已存在透明缓存' })
+        continue
+      }
+
+      const format: 'png' | 'webm' = asset.type === 'image' ? 'png' : 'webm'
+      const outputPath = path.join(outputDir, `${sanitizeFilename(asset.id)}-green-alpha.${format}`)
+      await runGreenScreenFfmpeg(ffmpegPath, asset.localPath, outputPath, format, keying)
+
+      const variant = {
+        kind: 'green-alpha' as const,
+        format,
+        localPath: outputPath,
+        sourceMtimeMs: sourceInfo.mtimeMs,
+        sourceSize: sourceInfo.size,
+        keying,
+        createdAt: new Date().toISOString(),
+        width: asset.width,
+        height: asset.height,
+        duration: asset.duration
+      }
+      asset.processedVariants = [...(asset.processedVariants || []).filter((item) => item.kind !== 'green-alpha'), variant]
+      success += 1
+      emit({ current, status: 'done', assetId, filename: asset.filename, message: '已生成透明缓存' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      failed += 1
+      errors.push({ assetId, filename: asset.filename, message })
+      emit({ current, status: 'failed', assetId, filename: asset.filename, message })
+    }
+  }
+
+  await saveAssetIndex(info, assets)
+  return { assets: assets.map(withFileUrl), success, skipped, failed, errors }
 }
 
 export async function searchAssets(
@@ -652,6 +759,100 @@ function assetTypeFromExtension(filePath: string): AssetType {
   if (ext === '.gif') return 'gif'
   if (['.ttf', '.otf', '.woff', '.woff2'].includes(ext)) return 'font'
   return 'image'
+}
+
+function isProcessableGreenAsset(asset: Asset): boolean {
+  if (!['image', 'video', 'gif'].includes(asset.type)) return false
+  const haystack = `${asset.filename} ${asset.title || ''} ${(asset.tags || []).join(' ')}`.toLowerCase()
+  return haystack.includes('green') || haystack.includes('绿幕') || haystack.includes('chroma') || haystack.includes('抠像')
+}
+
+function findValidGreenAlphaVariant(asset: Asset, keying: VisualKeying, sourceSize: number, sourceMtimeMs: number): NonNullable<Asset['processedVariants']>[number] | undefined {
+  return asset.processedVariants?.find((variant) => {
+    if (variant.kind !== 'green-alpha' || !existsSync(variant.localPath)) return false
+    return (
+      variant.sourceSize === sourceSize &&
+      Math.abs((variant.sourceMtimeMs || 0) - sourceMtimeMs) < 2 &&
+      greenKeyingKey(variant.keying) === greenKeyingKey(keying)
+    )
+  })
+}
+
+function normalizeGreenKeying(keying?: Partial<VisualKeying>): VisualKeying {
+  return {
+    enabled: true,
+    color: normalizeKeyingColor(keying?.color || '#00ff00'),
+    similarity: clamp(keying?.similarity ?? 0.24, 0.01, 1),
+    blend: clamp(keying?.blend ?? 0.08, 0, 1)
+  }
+}
+
+function normalizeKeyingColor(color: string): string {
+  const clean = color.trim().replace(/^0x/i, '#')
+  if (/^#[0-9a-f]{6}$/i.test(clean)) return clean.toLowerCase()
+  if (/^[0-9a-f]{6}$/i.test(clean)) return `#${clean.toLowerCase()}`
+  return '#00ff00'
+}
+
+function greenKeyingKey(keying?: Partial<VisualKeying>): string {
+  const normalized = normalizeGreenKeying(keying)
+  return `${normalized.color}:${normalized.similarity.toFixed(3)}:${normalized.blend.toFixed(3)}`
+}
+
+function ffmpegKeyingColor(color: string): string {
+  return normalizeKeyingColor(color).replace('#', '0x')
+}
+
+function resolveFfmpegPath(): string {
+  if (!ffmpegStaticPath) throw new Error('FFmpeg 不可用')
+  return ffmpegStaticPath.replace('app.asar', 'app.asar.unpacked')
+}
+
+function runGreenScreenFfmpeg(ffmpegPath: string, inputPath: string, outputPath: string, format: 'webm' | 'png', keying: VisualKeying): Promise<void> {
+  const chromakey = `chromakey=${ffmpegKeyingColor(keying.color)}:${keying.similarity.toFixed(3)}:${keying.blend.toFixed(3)}`
+  const args =
+    format === 'png'
+      ? ['-hide_banner', '-y', '-i', inputPath, '-vf', `${chromakey},format=rgba`, '-frames:v', '1', outputPath]
+      : [
+          '-hide_banner',
+          '-y',
+          '-i',
+          inputPath,
+          '-an',
+          '-vf',
+          `${chromakey},format=yuva420p`,
+          '-c:v',
+          'libvpx-vp9',
+          '-pix_fmt',
+          'yuva420p',
+          '-auto-alt-ref',
+          '0',
+          '-b:v',
+          '0',
+          '-crf',
+          '32',
+          outputPath
+        ]
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0 && existsSync(outputPath)) {
+        resolve()
+      } else {
+        reject(new Error(stderr.split(/\r?\n/).filter(Boolean).slice(-4).join(' ') || `FFmpeg 失败：${code}`))
+      }
+    })
+  })
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min))
 }
 
 function sanitizeFilename(value: string): string {
