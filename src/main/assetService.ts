@@ -216,7 +216,7 @@ export async function preprocessGreenScreenAssets(
     onProgress?.({ total: assetIds.length, success, skipped, failed, ...progress })
   }
 
-  for (let index = 0; index < assetIds.length; index += 1) {
+  async function processAsset(index: number): Promise<void> {
     const assetId = assetIds[index]
     const asset = assetsById.get(assetId)
     const current = index + 1
@@ -224,7 +224,7 @@ export async function preprocessGreenScreenAssets(
       failed += 1
       emit({ current, status: 'failed', assetId, filename: assetId, message: '素材不存在' })
       errors.push({ assetId, filename: assetId, message: '素材不存在' })
-      continue
+      return
     }
 
     emit({ current, status: 'processing', assetId, filename: asset.filename })
@@ -232,7 +232,7 @@ export async function preprocessGreenScreenAssets(
       if (!isProcessableGreenAsset(asset)) {
         skipped += 1
         emit({ current, status: 'skipped', assetId, filename: asset.filename, message: '非绿幕视觉素材' })
-        continue
+        return
       }
 
       const sourceInfo = await stat(asset.localPath)
@@ -240,7 +240,7 @@ export async function preprocessGreenScreenAssets(
       if (existing && !request.force) {
         skipped += 1
         emit({ current, status: 'skipped', assetId, filename: asset.filename, message: '已存在透明缓存' })
-        continue
+        return
       }
 
       const format: 'png' | 'webm' = asset.type === 'image' ? 'png' : 'webm'
@@ -269,6 +269,19 @@ export async function preprocessGreenScreenAssets(
       emit({ current, status: 'failed', assetId, filename: asset.filename, message })
     }
   }
+
+  let nextIndex = 0
+  const workerCount = Math.min(assetIds.length, 2)
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex
+        nextIndex += 1
+        if (index >= assetIds.length) return
+        await processAsset(index)
+      }
+    })
+  )
 
   await saveAssetIndex(info, assets)
   return { assets: assets.map(withFileUrl), success, skipped, failed, errors }
@@ -823,6 +836,14 @@ function runGreenScreenFfmpeg(ffmpegPath: string, inputPath: string, outputPath:
           `${chromakey},format=yuva420p`,
           '-c:v',
           'libvpx-vp9',
+          '-deadline',
+          'realtime',
+          '-cpu-used',
+          '6',
+          '-row-mt',
+          '1',
+          '-threads',
+          '0',
           '-pix_fmt',
           'yuva420p',
           '-auto-alt-ref',

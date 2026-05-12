@@ -1719,6 +1719,7 @@ function App(): JSX.Element {
                   isPlaying={isPlaying}
                   playbackRate={playerSpeed}
                   onSelect={selectTimelineItem}
+                  onClearSelection={() => setSelectedItemId(null)}
                   onPatchItem={moveTimelineItem}
                   onItemContextMenu={openItemContextMenu}
                   onDropAsset={addAssetToPreview}
@@ -2787,6 +2788,7 @@ function QuickPreview({
   isPlaying,
   playbackRate,
   onSelect,
+  onClearSelection,
   onPatchItem,
   onItemContextMenu,
   onDropAsset
@@ -2803,6 +2805,7 @@ function QuickPreview({
   isPlaying: boolean
   playbackRate: number
   onSelect: (id: string) => void
+  onClearSelection: () => void
   onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
   onDropAsset: (assetId: string, clientX: number, clientY: number, stage: HTMLElement) => void
@@ -2828,6 +2831,10 @@ function QuickPreview({
         event.dataTransfer.dropEffect = 'copy'
       }}
       onDrop={handleDrop}
+      onPointerDown={(event) => {
+        const target = event.target as HTMLElement
+        if (!target.closest('.preview-hitbox')) onClearSelection()
+      }}
       onWheel={(event) => {
         if (!event.ctrlKey || !wheelTarget) return
         event.preventDefault()
@@ -2903,6 +2910,8 @@ function QuickPreviewLayer({
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
 }): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const itemRef = useRef(item)
+  const patchItemRef = useRef(onPatchItem)
   const [dragState, setDragState] = useState<{
     startX: number
     startY: number
@@ -2922,6 +2931,14 @@ function QuickPreviewLayer({
   const keying = normalizeKeying(item.keying)
   const shouldKey = keying.enabled && !alphaVariant
   const style = previewLayerStyle(item, asset, transform, presetWidth, presetHeight, mediaSize)
+
+  useEffect(() => {
+    itemRef.current = item
+  }, [item])
+
+  useEffect(() => {
+    patchItemRef.current = onPatchItem
+  }, [onPatchItem])
 
   useEffect(() => {
     setMediaSize(mediaCanvasSize(asset))
@@ -2945,6 +2962,22 @@ function QuickPreviewLayer({
   useEffect(() => {
     if (!dragState) return
     const activeDrag = dragState
+    let animationFrame: number | null = null
+    let pendingPatch: Partial<TimelineItem> | null = null
+
+    function flushPatch(): void {
+      animationFrame = null
+      const patch = pendingPatch
+      pendingPatch = null
+      if (patch) patchItemRef.current(itemRef.current.id, patch)
+    }
+
+    function schedulePatch(patch: Partial<TimelineItem>): void {
+      pendingPatch = patch
+      if (animationFrame === null) {
+        animationFrame = window.requestAnimationFrame(flushPatch)
+      }
+    }
 
     function onPointerMove(event: globalThis.PointerEvent): void {
       const nextTransform = {
@@ -2952,20 +2985,25 @@ function QuickPreviewLayer({
         x: Math.round(activeDrag.startTransform.x + ((event.clientX - activeDrag.startX) / activeDrag.stageWidth) * presetWidth),
         y: Math.round(activeDrag.startTransform.y + ((event.clientY - activeDrag.startY) / activeDrag.stageHeight) * presetHeight)
       }
-      onPatchItem(item.id, patchVisualTransformAtFrame(item, activeDrag.localFrame, nextTransform))
+      schedulePatch(patchVisualTransformAtFrame(itemRef.current, activeDrag.localFrame, nextTransform))
     }
 
     function onPointerUp(): void {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+        flushPatch()
+      }
       setDragState(null)
     }
 
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp, { once: true })
     return () => {
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
     }
-  }, [dragState, item, onPatchItem, presetHeight, presetWidth])
+  }, [dragState, presetHeight, presetWidth])
 
   function beginStageDrag(event: PointerEvent<HTMLDivElement>): void {
     event.preventDefault()
@@ -3524,7 +3562,6 @@ function Timeline({
     durationFrames: number
     sourceInFrame: number
     laneWidth: number
-    latestPatch: Partial<TimelineItem>
   } | null>(null)
   const [durationDrag, setDurationDrag] = useState<{ startX: number; startFrames: number; laneWidth: number } | null>(null)
   const [trackDropTarget, setTrackDropTarget] = useState<string | null>(null)
@@ -3535,23 +3572,50 @@ function Timeline({
     valid: boolean
     label?: string
   } | null>(null)
-  const rulerTicks = makeRulerTicks(totalFrames, fps)
+  const projectRef = useRef(project)
+  const patchItemRef = useRef(onPatchItem)
+  const rulerTicks = useMemo(() => makeRulerTicks(totalFrames, fps), [fps, totalFrames])
   const visibleGroups = activeGroup === 'all' ? TRACK_GROUPS : TRACK_GROUPS.filter((group) => group.id === activeGroup)
+
+  useEffect(() => {
+    projectRef.current = project
+  }, [project])
+
+  useEffect(() => {
+    patchItemRef.current = onPatchItem
+  }, [onPatchItem])
 
   useEffect(() => {
     if (!dragState) return
     const activeDrag = dragState
+    let animationFrame: number | null = null
+    let pendingPatch: Partial<TimelineItem> | null = null
+
+    function flushPatch(): void {
+      animationFrame = null
+      const patch = pendingPatch
+      pendingPatch = null
+      if (patch) patchItemRef.current(activeDrag.item.id, patch)
+    }
+
+    function schedulePatch(patch: Partial<TimelineItem>): void {
+      pendingPatch = patch
+      if (animationFrame === null) {
+        animationFrame = window.requestAnimationFrame(flushPatch)
+      }
+    }
 
     function onPointerMove(event: globalThis.PointerEvent): void {
       const deltaFrames = Math.round(((event.clientX - activeDrag.startX) / activeDrag.laneWidth) * totalFrames)
       let patch: Partial<TimelineItem>
+      const currentProject = projectRef.current
 
       if (activeDrag.mode === 'move') {
         const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-track-id]')
         const trackId = lane?.dataset.trackId
         patch = {
           startFrame: Math.max(0, activeDrag.startFrame + deltaFrames),
-          ...(trackId && canMoveItemToTrack(project, activeDrag.item, trackId) ? { trackId } : {})
+          ...(trackId && canMoveItemToTrack(currentProject, activeDrag.item, trackId) ? { trackId } : {})
         }
       } else if (activeDrag.mode === 'trim-start') {
         const maxDelta = activeDrag.durationFrames - 1
@@ -3569,7 +3633,7 @@ function Timeline({
 
       if (snapEnabled && !event.altKey) {
         patch = snapTimelinePatch({
-          project,
+          project: currentProject,
           item: activeDrag.item,
           mode: activeDrag.mode,
           patch,
@@ -3583,21 +3647,25 @@ function Timeline({
         })
       }
 
-      setDragState((current) => (current ? { ...current, latestPatch: patch } : current))
-      onPatchItem(activeDrag.item.id, patch)
+      schedulePatch(patch)
     }
 
     function onPointerUp(): void {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+        flushPatch()
+      }
       setDragState(null)
     }
 
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp, { once: true })
     return () => {
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
     }
-  }, [dragState, fps, onPatchItem, playheadFrame, project, rulerTicks, snapEnabled, totalFrames])
+  }, [dragState, fps, playheadFrame, rulerTicks, snapEnabled, totalFrames])
 
   useEffect(() => {
     if (!durationDrag) return
@@ -3747,8 +3815,7 @@ function Timeline({
       startFrame: item.startFrame,
       durationFrames: item.durationFrames,
       sourceInFrame: item.sourceInFrame,
-      laneWidth: lane?.getBoundingClientRect().width || 960,
-      latestPatch: {}
+      laneWidth: lane?.getBoundingClientRect().width || 960
     })
     onSelect(item.id)
   }

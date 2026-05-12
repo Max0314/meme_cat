@@ -83,9 +83,7 @@ input,
 select,
 textarea,
 .workspace-grid,
-.statusline,
-.project-title,
-.top-actions {
+.statusline {
   -webkit-app-region: no-drag;
 }
 
@@ -2790,11 +2788,11 @@ body {
 .preview-hitbox {
   position: absolute;
   z-index: 9;
-  border-radius: 7px;
+  border: 1px solid transparent;
+  border-radius: 0;
   pointer-events: auto;
   cursor: grab;
-  outline: 1px solid transparent;
-  outline-offset: 2px;
+  outline: 0;
 }
 
 .preview-hitbox:active {
@@ -2802,10 +2800,8 @@ body {
 }
 
 .preview-hitbox.selected {
-  outline: 2px solid rgba(37, 99, 235, 0.95);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.86),
-    0 0 0 5px rgba(37, 99, 235, 0.14);
+  border-color: #ffffff;
+  box-shadow: none;
 }
 
 .preview-subtitle {
