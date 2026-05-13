@@ -47,6 +47,16 @@ interface MediaSize {
 
 const audioProbeCache = new Map<string, boolean>()
 const mediaSizeProbeCache = new Map<string, MediaSize | null>()
+const DEFAULT_ROLE_LABEL_STYLE: ProjectFile['subtitleStyle'] = {
+  fontFamily: 'Microsoft YaHei, Microsoft JhengHei, SimHei, Arial, sans-serif',
+  fontSize: 36,
+  color: '#ffe933',
+  outlineColor: '#111111',
+  outlineWidth: 3,
+  position: 'bottom',
+  background: false,
+  backgroundColor: '#111827'
+}
 
 export async function renderProject(
   info: WorkspaceInfo,
@@ -110,7 +120,7 @@ async function buildFfmpegArgs(
     .filter((item) => ['voice', 'music', 'sfx'].includes(item.type) && enabledTracks.has(item.trackId) && item.assetId && item.durationFrames > 0)
     .sort((a, b) => a.startFrame - b.startFrame)
 
-  const totalFrames = Math.max(projectDurationFrames(project), preset.fps * 4)
+  const totalFrames = projectDurationFrames(project, preset.fps)
   const totalSeconds = framesToSeconds(totalFrames, preset.fps)
   const visualSegments: VisualSegment[] = []
   const audioSegments: AudioSegment[] = []
@@ -130,6 +140,7 @@ async function buildFfmpegArgs(
     const asset = item.assetId ? assetsById.get(item.assetId) : undefined
     if (!asset?.localPath) continue
     const durationSeconds = framesToSeconds(item.durationFrames, preset.fps)
+    const sourceDurationSeconds = mediaSourceDurationSeconds(item, asset, durationSeconds)
     const sourceInSeconds = sourceInSecondsForItem(item, asset, preset.fps)
     const alphaVariant = findGreenAlphaVariant(asset)
     const inputPath = alphaVariant?.localPath || asset.localPath
@@ -138,10 +149,10 @@ async function buildFfmpegArgs(
     if (inputType === 'image') {
       args.push('-loop', '1', '-t', durationSeconds.toFixed(3), '-i', inputPath)
     } else if (inputType === 'gif') {
-      args.push('-ignore_loop', item.loop ? '0' : '1', '-t', durationSeconds.toFixed(3), '-i', inputPath)
+      args.push('-ignore_loop', item.loop ? '0' : '1', '-t', sourceDurationSeconds.toFixed(3), '-i', inputPath)
     } else {
       if (item.loop) args.push('-stream_loop', '-1')
-      args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', inputPath)
+      args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', inputPath)
     }
 
     visualSegments.push({
@@ -155,7 +166,7 @@ async function buildFfmpegArgs(
     if (asset.type === 'video' && (item.volume ?? 1) > 0 && (await hasAudioStream(ffmpegPath, asset.localPath))) {
       if (alphaVariant) {
         if (item.loop) args.push('-stream_loop', '-1')
-        args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
+        args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', asset.localPath)
         audioSegments.push({ inputIndex: inputIndex + 1, item, durationSeconds })
         inputIndex += 1
       } else {
@@ -170,9 +181,10 @@ async function buildFfmpegArgs(
     if (!asset?.localPath) continue
     if (asset.type === 'video' && !(await hasAudioStream(ffmpegPath, asset.localPath))) continue
     const durationSeconds = framesToSeconds(item.durationFrames, preset.fps)
+    const sourceDurationSeconds = mediaSourceDurationSeconds(item, asset, durationSeconds)
     const sourceInSeconds = sourceInSecondsForItem(item, asset, preset.fps)
     if (item.loop) args.push('-stream_loop', '-1')
-    args.push('-ss', sourceInSeconds.toFixed(3), '-t', durationSeconds.toFixed(3), '-i', asset.localPath)
+    args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', asset.localPath)
     audioSegments.push({ inputIndex, item, durationSeconds })
     inputIndex += 1
   }
@@ -198,7 +210,6 @@ async function buildFfmpegArgs(
     'yuv420p',
     '-movflags',
     '+faststart',
-    '-shortest',
     '-y',
     outputPath
   )
@@ -233,7 +244,8 @@ async function buildFilterComplex(
       const scaledHeight = even(
         Math.max(2, Math.round(fitCanvas ? scaledWidth / mediaAspectRatio(segment.asset, segment.mediaSize) : preset.height * chunk.transform.scale))
       )
-      const sourceStartSeconds = framesToSeconds(chunk.sourceStartFrame, preset.fps)
+      const playbackRate = mediaPlaybackRateForAsset(segment.item, segment.asset)
+      const sourceStartSeconds = framesToSeconds(chunk.sourceStartFrame, preset.fps) * playbackRate
       const chunkDurationSeconds = framesToSeconds(chunk.durationFrames, preset.fps)
       const startSeconds = framesToSeconds(segment.item.startFrame + chunk.sourceStartFrame, preset.fps)
       const endSeconds = startSeconds + chunkDurationSeconds
@@ -244,7 +256,21 @@ async function buildFilterComplex(
 
       filters.push(
         `[${sourceLabel}]` +
-          buildVisualLayerFilters(segment.item, preset, scaledWidth, scaledHeight, chunkDurationSeconds, startSeconds, opacity, fitCanvas, chunk.transform, sourceStartSeconds, Boolean(segment.alphaVariant), chunk.filters).join(',') +
+          buildVisualLayerFilters(
+            segment.item,
+            preset,
+            scaledWidth,
+            scaledHeight,
+            chunkDurationSeconds,
+            startSeconds,
+            opacity,
+            fitCanvas,
+            chunk.transform,
+            sourceStartSeconds,
+            playbackRate,
+            Boolean(segment.alphaVariant),
+            chunk.filters
+          ).join(',') +
           `[${overlayLabel}]`
       )
       filters.push(
@@ -257,9 +283,10 @@ async function buildFilterComplex(
     })
   })
 
-  const subtitleItems = buildSubtitleItems(project)
-  if (subtitleItems.length) {
-    await writeFile(assPath, makeAssFile(project, preset, subtitleItems), 'utf-8')
+  const subtitleItems = buildSubtitleItems(project, preset.fps)
+  const hasRoleLabels = visualSegments.some((segment) => roleLabelForItem(segment.item).visible && roleLabelForItem(segment.item).text.trim())
+  if (subtitleItems.length || hasRoleLabels) {
+    await writeFile(assPath, makeAssFile(project, preset, subtitleItems, visualSegments), 'utf-8')
     filters.push(`[${currentVideoLabel}]subtitles='${escapeFilterPath(assPath)}'[vsub]`)
     filters.push('[vsub]format=yuv420p[vout]')
   } else {
@@ -272,9 +299,16 @@ async function buildFilterComplex(
       const label = `a${index}`
       const delay = Math.max(0, Math.round(framesToSeconds(segment.item.startFrame, preset.fps) * 1000))
       const volume = Math.max(0, Math.min(segment.item.volume ?? 1, 2.5)).toFixed(2)
-      filters.push(
-        `[${segment.inputIndex}:a]atrim=duration=${segment.durationSeconds.toFixed(3)},asetpts=PTS-STARTPTS,volume=${volume},adelay=${delay}|${delay}[${label}]`
-      )
+      const rate = itemPlaybackRate(segment.item)
+      const sourceDurationSeconds = segment.durationSeconds * rate
+      const audioFilters = [
+        `atrim=duration=${sourceDurationSeconds.toFixed(3)}`,
+        'asetpts=PTS-STARTPTS',
+        ...atempoFilters(rate),
+        `volume=${volume}`,
+        `adelay=${delay}|${delay}`
+      ]
+      filters.push(`[${segment.inputIndex}:a]${audioFilters.join(',')}[${label}]`)
       audioLabels.push(`[${label}]`)
     })
     if (audioLabels.length === 1) {
@@ -287,7 +321,7 @@ async function buildFilterComplex(
   return filters.join(';')
 }
 
-function buildSubtitleItems(project: ProjectFile): TimelineItem[] {
+function buildSubtitleItems(project: ProjectFile, fps: number): TimelineItem[] {
   const enabledTracks = new Set(project.tracks.filter((track) => !track.muted).map((track) => track.id))
   const explicit = project.timeline
     .filter((item) => item.type === 'subtitle' && enabledTracks.has(item.trackId) && (item.text || item.speakerName) && item.durationFrames > 0)
@@ -300,7 +334,7 @@ function buildSubtitleItems(project: ProjectFile): TimelineItem[] {
     .filter(Boolean)
   if (!lines.length) return []
 
-  const totalFrames = Math.max(projectDurationFrames(project), 30 * 8)
+  const totalFrames = projectDurationFrames(project, fps)
   const perLine = Math.max(24, Math.floor(totalFrames / lines.length))
   return lines.map((text, index) => ({
     id: `auto-sub-${index}`,
@@ -315,7 +349,7 @@ function buildSubtitleItems(project: ProjectFile): TimelineItem[] {
   }))
 }
 
-function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: TimelineItem[]): string {
+function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: TimelineItem[], visualSegments: VisualSegment[]): string {
   const baseStyle = normalizeSubtitleStyle(project.subtitleStyle)
 
   const header = [
@@ -333,7 +367,7 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
   ]
 
-  const events = subtitleItems.flatMap((item) => {
+  const subtitleEvents = subtitleItems.flatMap((item) => {
     const start = framesToAssTime(item.startFrame, preset.fps)
     const end = framesToAssTime(item.startFrame + item.durationFrames, preset.fps)
     const style = normalizeSubtitleStyle({ ...baseStyle, ...item.style })
@@ -354,8 +388,47 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
     }
     return lines
   })
+  const roleLabelEvents = buildRoleLabelAssEvents(visualSegments, preset)
 
-  return [...header, ...events, ''].join('\n')
+  return [...header, ...roleLabelEvents, ...subtitleEvents, ''].join('\n')
+}
+
+function buildRoleLabelAssEvents(visualSegments: VisualSegment[], preset: ExportPreset): string[] {
+  return visualSegments.flatMap((segment) => {
+    const label = roleLabelForItem(segment.item)
+    if (!label.visible || !label.text.trim()) return []
+    return visualRenderChunks(segment.item, preset).map((chunk) => {
+      const startFrame = segment.item.startFrame + chunk.sourceStartFrame
+      const endFrame = startFrame + chunk.durationFrames
+      return `Dialogue: 1,${framesToAssTime(startFrame, preset.fps)},${framesToAssTime(endFrame, preset.fps)},${speakerStyleName(
+        label.style.position
+      )},,0,0,0,,${roleLabelAssOverride(segment, chunk.transform, label.style, preset)}${escapeAssText(label.text.trim())}`
+    })
+  })
+}
+
+function roleLabelAssOverride(
+  segment: VisualSegment,
+  transform: VisualTransform,
+  style: ProjectFile['subtitleStyle'],
+  preset: ExportPreset
+): string {
+  const fitCanvas = !isBackgroundVisualSegment(segment)
+  const width = Math.max(2, Math.round(preset.width * transform.scale))
+  const height = Math.max(2, Math.round(fitCanvas ? width / mediaAspectRatio(segment.asset, segment.mediaSize) : preset.height * transform.scale))
+  const padding = Math.max(6, Math.round(style.fontSize * 0.16))
+  const x = Math.round(preset.width / 2 + transform.x)
+  const baseY = preset.height / 2 + transform.y
+  const y =
+    style.position === 'top'
+      ? Math.round(baseY - height / 2 - padding)
+      : style.position === 'middle'
+        ? Math.round(baseY)
+        : Math.round(baseY + height / 2 + padding)
+  const scale = Math.round(transform.scale * 100)
+  return `{\\an5\\pos(${x},${y})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\fn${assFontName(
+    style.fontFamily
+  )}\\fs${style.fontSize}\\c${assColor(style.color)}\\3c${assColor(style.outlineColor)}\\bord${style.outlineWidth}}`
 }
 
 function assTransformOverride(
@@ -417,6 +490,18 @@ function normalizeSubtitleStyle(style?: Partial<ProjectFile['subtitleStyle']>): 
     position: style?.position || 'top',
     background: style?.background ?? false,
     backgroundColor: /^#[0-9a-f]{6}$/i.test(style?.backgroundColor || '') ? style?.backgroundColor || '#111827' : '#111827'
+  }
+}
+
+function normalizeRoleLabelStyle(style?: Partial<ProjectFile['subtitleStyle']>): ProjectFile['subtitleStyle'] {
+  return normalizeSubtitleStyle({ ...DEFAULT_ROLE_LABEL_STYLE, ...style })
+}
+
+function roleLabelForItem(item: TimelineItem): { text: string; visible: boolean; style: ProjectFile['subtitleStyle'] } {
+  return {
+    text: item.roleLabel?.text || '',
+    visible: item.roleLabel?.visible ?? Boolean(item.roleLabel?.text?.trim()),
+    style: normalizeRoleLabelStyle(item.roleLabel?.style)
   }
 }
 
@@ -533,12 +618,20 @@ function probeMediaSize(ffmpegPath: string, filePath: string): Promise<MediaSize
   })
 }
 
-function projectDurationFrames(project: ProjectFile): number {
+function projectContentEndFrame(project: ProjectFile): number {
   return project.timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0)
 }
 
+function projectDurationFrames(project: ProjectFile, fps: number): number {
+  const configuredFrames =
+    typeof project.durationSeconds === 'number' && Number.isFinite(project.durationSeconds)
+      ? Math.round(project.durationSeconds * fps)
+      : fps * 10
+  return Math.max(projectContentEndFrame(project), configuredFrames, fps * 4)
+}
+
 function projectDurationSeconds(project: ProjectFile, fps: number): number {
-  return framesToSeconds(Math.max(projectDurationFrames(project), fps * 4), fps)
+  return framesToSeconds(projectDurationFrames(project, fps), fps)
 }
 
 function normalizeTransform(transform?: Partial<VisualTransform>): VisualTransform {
@@ -738,6 +831,7 @@ function buildVisualLayerFilters(
   fitCanvas: boolean,
   transformOverride?: VisualTransform,
   sourceStartSeconds = 0,
+  playbackRate = 1,
   skipKeying = false,
   effectFilters: string[] = []
 ): string[] {
@@ -771,9 +865,11 @@ function buildVisualLayerFilters(
 
   filters.push(...effectFilters)
 
+  const rate = clamp(playbackRate, 0.25, 4)
+  const sourceDurationSeconds = durationSeconds * rate
   filters.push(
-    `trim=start=${sourceStartSeconds.toFixed(3)}:duration=${durationSeconds.toFixed(3)}`,
-    `setpts=PTS-STARTPTS+${startSeconds.toFixed(3)}/TB`,
+    `trim=start=${sourceStartSeconds.toFixed(3)}:duration=${sourceDurationSeconds.toFixed(3)}`,
+    `setpts=(PTS-STARTPTS)/${rate.toFixed(4)}+${startSeconds.toFixed(3)}/TB`,
     `colorchannelmixer=aa=${opacity}`
   )
 
@@ -797,6 +893,33 @@ function even(value: number): number {
 
 function framesToSeconds(frames: number, fps: number): number {
   return frames / fps
+}
+
+function itemPlaybackRate(item: TimelineItem): number {
+  return clamp(item.playbackRate ?? 1, 0.25, 4)
+}
+
+function mediaPlaybackRateForAsset(item: TimelineItem, asset: Asset): number {
+  return asset.type === 'video' || asset.type === 'gif' || asset.type === 'audio' ? itemPlaybackRate(item) : 1
+}
+
+function mediaSourceDurationSeconds(item: TimelineItem, asset: Asset, durationSeconds: number): number {
+  return durationSeconds * mediaPlaybackRateForAsset(item, asset)
+}
+
+function atempoFilters(rate: number): string[] {
+  const filters: string[] = []
+  let remaining = clamp(rate, 0.25, 4)
+  while (remaining < 0.5) {
+    filters.push('atempo=0.5')
+    remaining /= 0.5
+  }
+  while (remaining > 2) {
+    filters.push('atempo=2')
+    remaining /= 2
+  }
+  if (Math.abs(remaining - 1) > 0.001) filters.push(`atempo=${remaining.toFixed(4)}`)
+  return filters
 }
 
 function sourceInSecondsForItem(item: TimelineItem, asset: Asset, fps: number): number {

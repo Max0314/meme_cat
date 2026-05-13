@@ -994,11 +994,17 @@ button:disabled,
 .preview-layer {
   position: absolute;
   transform: translate(-50%, -50%);
-  overflow: hidden;
+  overflow: visible;
   border-radius: 8px;
   cursor: grab;
   outline: 1px solid transparent;
   outline-offset: 2px;
+}
+
+.preview-layer > img,
+.preview-layer > video,
+.preview-layer > canvas {
+  border-radius: inherit;
 }
 
 .preview-layer:active {
@@ -1077,6 +1083,34 @@ button:disabled,
   bottom: 4%;
 }
 
+.preview-role-label {
+  position: absolute;
+  z-index: 13;
+  display: flex;
+  justify-content: center;
+  width: max-content;
+  max-width: 150%;
+  min-width: 24px;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.preview-role-label span {
+  display: block;
+  max-width: min(220px, 150%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 850;
+  line-height: 1.18;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.preview-role-label:active {
+  cursor: grabbing;
+}
+
 .preview-empty {
   position: absolute;
   inset: 0;
@@ -1092,8 +1126,32 @@ button:disabled,
   min-width: 0;
 }
 
+.preview-speed-control,
+.duration-quick-controls,
+.duration-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preview-speed-control span,
+.duration-input span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .speed-select {
   width: 76px;
+}
+
+.duration-input input {
+  width: 64px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--text);
 }
 
 .shortcut-strip {
@@ -2165,6 +2223,13 @@ button:disabled,
   border: 1px solid #dbe4ef;
   border-radius: 7px;
   background: #ffffff;
+}
+
+.frame-readout .duration-input span,
+.preview-speed-control span {
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .asset-workbench {

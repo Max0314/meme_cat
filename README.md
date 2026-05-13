@@ -44,8 +44,8 @@ Cat meme theater product notes are in `docs/cat-meme-theater-design.md`.
 - `0`: reset selected visual clip transform
 - `M`: mute or unmute the selected clip
 - `Ctrl + mouse wheel` on the preview: scale the selected visual clip
-- `Ctrl + mouse wheel` on the timeline: zoom the timeline
-- `Ctrl + +` / `Ctrl + -`: zoom the timeline
+- `Ctrl + mouse wheel` on the timeline: zoom the timeline view only
+- `Ctrl + +` / `Ctrl + -`: zoom the timeline view only
 
 Timeline editing:
 
@@ -53,7 +53,9 @@ Timeline editing:
 - Drag a local image/video/GIF asset directly onto the preview canvas to place it visually at the current playhead frame.
 - Drag a clip horizontally to change the frame where it appears.
 - Drag a clip to another matching track to change its layer order.
-- Drag the left or right edge of a clip to trim its in/out frames.
+- Drag the left or right edge of a video or audio clip to rate-stretch it; playback speed changes while the source in-point stays fixed.
+- Use `[` / `]`, split, or the inspector source in field when you want trimming instead of rate stretch.
+- Set the project duration from the timeline duration controls or the project overview; 15s, 30s, and 60s are available as quick choices.
 - Use the selected visual clip inspector to set X/Y position, scale, rotation, horizontal flip, vertical flip, and opacity.
 - Green-screen assets imported from the resource folder auto-enable keying when placed on a visual track; tune it in the selected clip inspector.
 - Quick preview now plays active voice, music, SFX tracks, and native audio from visible video clips. Export also mixes detected video native audio plus audio-track clips.

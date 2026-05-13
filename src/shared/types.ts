@@ -165,6 +165,12 @@ export interface VisualKeying {
   blend: number
 }
 
+export interface RoleLabel {
+  text?: string
+  visible?: boolean
+  style?: Partial<SubtitleStyle>
+}
+
 export interface CharacterMemeState {
   id: string
   name: string
@@ -198,6 +204,7 @@ export interface TimelineItem {
   startFrame: number
   durationFrames: number
   sourceInFrame: number
+  playbackRate?: number
   effects: TimelineEffect[]
   volume?: number
   loop?: boolean
@@ -206,6 +213,7 @@ export interface TimelineItem {
   speakerVisible?: boolean
   speakerPosition?: 'top' | 'middle' | 'bottom'
   style?: Partial<SubtitleStyle>
+  roleLabel?: RoleLabel
   transform?: Partial<VisualTransform>
   keyframes?: VisualKeyframe[]
   keying?: Partial<VisualKeying>
@@ -241,6 +249,7 @@ export interface ProjectFile {
   updatedAt: string
   exportPresetId: string
   customExportPreset?: ExportPreset
+  durationSeconds?: number
   tracks: TimelineTrack[]
   timeline: TimelineItem[]
   assets: Asset[]

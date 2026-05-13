@@ -37,6 +37,7 @@ export async function exportDemoVideo(info: WorkspaceInfo): Promise<string> {
     createdAt: now,
     updatedAt: now,
     exportPresetId: preset.id,
+    durationSeconds: Math.ceil(timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0) / fps),
     tracks: [
       { id: 'visual-main', name: '背景视频', kind: 'visual', locked: false, muted: false },
       { id: 'visual-role-a', name: '角色猫 A', kind: 'visual', locked: false, muted: false },
@@ -118,6 +119,7 @@ export async function exportResourceDemoVideo(info: WorkspaceInfo): Promise<stri
     createdAt,
     updatedAt: createdAt,
     exportPresetId: preset.id,
+    durationSeconds: totalFrames / fps,
     tracks: [
       { id: 'visual-main', name: '背景视频', kind: 'visual', locked: false, muted: false },
       { id: 'visual-role-a', name: '角色猫 A', kind: 'visual', locked: false, muted: false },
