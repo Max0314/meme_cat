@@ -152,6 +152,7 @@ async function buildFfmpegArgs(
       args.push('-ignore_loop', item.loop ? '0' : '1', '-t', sourceDurationSeconds.toFixed(3), '-i', inputPath)
     } else {
       if (item.loop) args.push('-stream_loop', '-1')
+      if (alphaVariant?.format === 'webm') args.push('-c:v', 'libvpx-vp9')
       args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', inputPath)
     }
 
