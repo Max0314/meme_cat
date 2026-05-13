@@ -3404,6 +3404,231 @@ body {
   color: #1d4ed8;
 }
 
+/* Right inspector compact layout */
+.property-inspector {
+  gap: 8px;
+  padding: 8px;
+  font-size: 12px;
+}
+
+.property-inspector .inspector {
+  gap: 8px;
+  padding: 9px;
+  border-radius: 8px;
+}
+
+.property-inspector .panel-title {
+  gap: 6px;
+  min-height: 18px;
+  margin-bottom: 0;
+}
+
+.property-inspector .panel-title strong {
+  font-size: 13px;
+}
+
+.property-inspector .panel-title.mini strong {
+  font-size: 12px;
+}
+
+.property-inspector .panel-title svg {
+  width: 14px;
+  height: 14px;
+}
+
+.property-inspector .field {
+  gap: 4px;
+}
+
+.property-inspector .field span,
+.property-inspector .toggle-field,
+.property-inspector .mini-link,
+.property-inspector .command,
+.property-inspector .transform-presets button {
+  font-size: 11px;
+}
+
+.property-inspector input,
+.property-inspector select {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.property-inspector input[type='color'] {
+  padding: 2px;
+}
+
+.property-inspector input[type='range'] {
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--blue);
+}
+
+.property-inspector textarea {
+  min-height: 66px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.property-inspector .number-grid,
+.property-inspector .two-buttons,
+.property-inspector .track-toggle-row,
+.property-inspector .overview-metrics {
+  gap: 6px;
+}
+
+.property-inspector .metric {
+  gap: 3px;
+  padding: 7px;
+  border-radius: 7px;
+}
+
+.property-inspector .metric strong {
+  font-size: 12px;
+}
+
+.property-inspector .transform-editor,
+.property-inspector .effect-editor,
+.property-inspector .inspector-disclosure {
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.property-inspector .transform-editor,
+.property-inspector .effect-editor {
+  display: grid;
+}
+
+.property-inspector .effect-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px;
+  gap: 6px;
+  align-items: end;
+}
+
+.property-inspector .effect-intensity-slider:disabled {
+  opacity: 0.45;
+}
+
+.property-inspector .inspector-hint {
+  display: block;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.32;
+}
+
+.property-inspector .inspector-disclosure {
+  display: block;
+}
+
+.property-inspector .inspector-disclosure summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 16px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  list-style: none;
+}
+
+.property-inspector .inspector-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.property-inspector .inspector-disclosure summary::after {
+  content: '>';
+  color: var(--muted);
+  font-size: 11px;
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+
+.property-inspector .inspector-disclosure:not([open]) summary::after {
+  transform: none;
+}
+
+.property-inspector .inspector-disclosure summary small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.property-inspector .inspector-disclosure-body {
+  display: grid;
+  gap: 7px;
+  padding-top: 8px;
+}
+
+.property-inspector .compact-toggle {
+  min-height: 30px;
+  padding: 0 7px;
+  border-radius: 7px;
+}
+
+.property-inspector .keyframe-status {
+  padding: 5px 7px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.property-inspector .keyframe-actions {
+  gap: 5px;
+}
+
+.property-inspector .keyframe-actions .command {
+  min-height: 28px;
+  padding: 0 6px;
+}
+
+.property-inspector .loop-toggle,
+.property-inspector .command {
+  min-height: 30px;
+  border-radius: 7px;
+}
+
+.property-inspector .overview-title,
+.property-inspector .overview-rules,
+.property-inspector .quality-card,
+.property-inspector .last-export-mini {
+  gap: 3px;
+  padding: 8px;
+  border-radius: 7px;
+}
+
+.property-inspector .overview-title span,
+.property-inspector .overview-rules span,
+.property-inspector .quality-card span,
+.property-inspector .last-export-mini span,
+.property-inspector .small-note {
+  font-size: 11px;
+  line-height: 1.32;
+}
+
+.property-inspector .transform-presets {
+  gap: 5px;
+}
+
+.property-inspector .transform-presets button {
+  height: 28px;
+  border-radius: 7px;
+}
+
 /* Asset preview and editor density refinements */
 .workspace-grid {
   grid-template-columns: minmax(320px, 0.82fr) minmax(620px, 1.7fr) minmax(290px, 0.74fr);

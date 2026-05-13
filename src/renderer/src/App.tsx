@@ -3830,7 +3830,7 @@ function TrackInspector({
         <Metric label="层级" value={group.output === 'visual' ? '下方更上层' : '混音'} />
         <Metric label={outputLabel} value={track.muted ? '关闭' : '开启'} />
       </div>
-      <p className="muted small-note">视觉轨道越靠下，画面里越在上层；拖动轨道左侧把手可调整层级。</p>
+      <p className="muted small-note">下方视觉轨会盖在上方。</p>
     </section>
   )
 }
@@ -3861,6 +3861,11 @@ function SelectedInspector({
     )
   }
   const effect = item.effects[0] || DEFAULT_EFFECTS[0]
+  const effectDisabled = effect.type === 'none'
+  const patchEffectIntensity = (value: number): void => {
+    const intensity = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
+    onPatch({ effects: [{ ...effect, intensity }] })
+  }
   return (
     <section className="inspector">
       <PanelTitle icon={<SlidersHorizontal />} title="片段" />
@@ -3885,31 +3890,59 @@ function SelectedInspector({
       )}
       {item.type === 'visual' && (
         <>
-          <label className="field compact">
-            <span>效果</span>
-            <select
-              value={effect.type}
-              onChange={(event) =>
-                onPatch({
-                  effects: [
-                    DEFAULT_EFFECTS.find((item) => item.type === event.target.value) || {
-                      id: crypto.randomUUID(),
-                      type: 'none',
-                      intensity: 0
-                    }
-                  ]
-                })
-              }
-            >
-              {DEFAULT_EFFECTS.map((option) => (
-                <option value={option.type} key={option.type}>
-                  {effectName(option.type)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <VisualKeyframeEditor item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} onSeek={onSeek} />
+          <div className="effect-editor">
+            <div className="effect-header">
+              <label className="field compact">
+                <span>效果</span>
+                <select
+                  value={effect.type}
+                  onChange={(event) =>
+                    onPatch({
+                      effects: [
+                        DEFAULT_EFFECTS.find((item) => item.type === event.target.value) || {
+                          id: crypto.randomUUID(),
+                          type: 'none',
+                          intensity: 0
+                        }
+                      ]
+                    })
+                  }
+                >
+                  {DEFAULT_EFFECTS.map((option) => (
+                    <option value={option.type} key={option.type}>
+                      {effectName(option.type)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field compact">
+                <span>强度</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  disabled={effectDisabled}
+                  value={effect.intensity}
+                  onChange={(event) => patchEffectIntensity(Number(event.target.value))}
+                />
+              </label>
+            </div>
+            <input
+              className="effect-intensity-slider"
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              disabled={effectDisabled}
+              value={effect.intensity}
+              aria-label="效果强度"
+              onChange={(event) => patchEffectIntensity(Number(event.target.value))}
+            />
+            <InspectorHint>{effectHint(effect.type)}</InspectorHint>
+          </div>
           <VisualTransformEditor item={item} playheadFrame={playheadFrame} onPatch={onPatch} />
+          <VisualKeyframeEditor item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} onSeek={onSeek} />
           <VisualKeyingEditor item={item} onPatch={onPatch} />
         </>
       )}
@@ -3967,9 +4000,8 @@ function ProjectOverviewInspector({
         <span>{missingCount ? `有 ${missingCount} 个时间线素材未找到` : '时间线素材完整，可以继续剪辑或导出。'}</span>
       </div>
       <div className="overview-rules">
-        <span>背景素材自动进入最底层背景轨。</span>
-        <span>角色绿幕保持原始比例，不随横竖屏拉伸。</span>
-        <span>拖入素材时，当前播放头就是素材第一帧。</span>
+        <span>背景置底，播放头即素材首帧。</span>
+        <span>角色绿幕保留原比例。</span>
         {mutedTracks > 0 && <span>{mutedTracks} 条轨道处于隐藏或静音状态。</span>}
       </div>
       {lastExport && (
@@ -4715,6 +4747,22 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   )
 }
 
+function InspectorHint({ children }: { children: ReactNode }): JSX.Element {
+  return <small className="inspector-hint">{children}</small>
+}
+
+function InspectorDisclosure({ title, meta, children }: { title: string; meta?: string; children: ReactNode }): JSX.Element {
+  return (
+    <details className="inspector-disclosure">
+      <summary>
+        <span>{title}</span>
+        {meta && <small>{meta}</small>}
+      </summary>
+      <div className="inspector-disclosure-body">{children}</div>
+    </details>
+  )
+}
+
 function VisualKeyframeEditor({
   item,
   fps,
@@ -4759,7 +4807,7 @@ function VisualKeyframeEditor({
           删除
         </button>
       </div>
-      <small className="muted">支持位置、缩放、旋转、透明度。当前帧有关键帧时，下面的变换会直接更新这一帧。</small>
+      <InspectorHint>当前帧有关键帧时，变换会更新该帧。</InspectorHint>
     </div>
   )
 }
@@ -4820,14 +4868,16 @@ function VisualTransformEditor({
           <span>垂直对称</span>
         </label>
       </div>
-      <div className="transform-presets">
-        <button onClick={() => patchTransform({ x: 0, y: 0, scale: 1, rotation: 0, flipX: false, flipY: false, opacity: 1 })}>全屏</button>
-        <button onClick={() => patchTransform({ x: -260, y: 140, scale: 0.42, rotation: 0, opacity: 1 })}>左下角色</button>
-        <button onClick={() => patchTransform({ x: 260, y: 140, scale: 0.42, rotation: 0, opacity: 1 })}>右下角色</button>
-        <button onClick={() => patchTransform({ x: 0, y: -420, scale: 0.34, rotation: 0, opacity: 1 })}>顶部表情</button>
-        <button onClick={() => patchTransform({ rotation: transform.rotation - 15 })}>左旋 15°</button>
-        <button onClick={() => patchTransform({ rotation: transform.rotation + 15 })}>右旋 15°</button>
-      </div>
+      <InspectorDisclosure title="变换预设" meta="快速摆位">
+        <div className="transform-presets">
+          <button onClick={() => patchTransform({ x: 0, y: 0, scale: 1, rotation: 0, flipX: false, flipY: false, opacity: 1 })}>全屏</button>
+          <button onClick={() => patchTransform({ x: -260, y: 140, scale: 0.42, rotation: 0, opacity: 1 })}>左下角色</button>
+          <button onClick={() => patchTransform({ x: 260, y: 140, scale: 0.42, rotation: 0, opacity: 1 })}>右下角色</button>
+          <button onClick={() => patchTransform({ x: 0, y: -420, scale: 0.34, rotation: 0, opacity: 1 })}>顶部表情</button>
+          <button onClick={() => patchTransform({ rotation: transform.rotation - 15 })}>左旋 15°</button>
+          <button onClick={() => patchTransform({ rotation: transform.rotation + 15 })}>右旋 15°</button>
+        </div>
+      </InspectorDisclosure>
     </div>
   )
 }
@@ -4959,10 +5009,10 @@ function VisualKeyingEditor({
   }
 
   return (
-    <div className="transform-editor">
-      <label className="toggle-field">
+    <InspectorDisclosure title="绿幕抠像" meta={keying.enabled ? '已启用' : '可选'}>
+      <label className="toggle-field compact-toggle">
         <input type="checkbox" checked={keying.enabled} onChange={(event) => patchKeying({ enabled: event.target.checked })} />
-        <span>绿幕抠像</span>
+        <span>启用抠像</span>
       </label>
       <div className="number-grid">
         <label className="field compact">
@@ -4995,7 +5045,7 @@ function VisualKeyingEditor({
           绿幕默认
         </button>
       </div>
-    </div>
+    </InspectorDisclosure>
   )
 }
 
@@ -5739,6 +5789,19 @@ function effectName(effect: string): string {
     flash: '闪白'
   }
   return names[effect] || effect
+}
+
+function effectHint(effect: string): string {
+  const hints: Record<string, string> = {
+    none: '不添加动态效果。',
+    'zoom-in': '轻微推近画面。',
+    'zoom-out': '轻微拉远画面。',
+    'pan-left': '画面向左移动。',
+    'pan-right': '画面向右移动。',
+    shake: '制造短促抖动。',
+    flash: '叠加闪白冲击。'
+  }
+  return hints[effect] || '调整效果强度。'
 }
 
 function trackIdForKind(project: ProjectFile, kind: TrackKind, selectedItem: TimelineItem | null): string {
