@@ -75,6 +75,7 @@ import {
   ASSET_PRIMARY_CATEGORIES,
   ASSET_SORT_OPTIONS,
   ASSET_TYPE_OPTIONS,
+  DEFAULT_ROLE_LABEL_STYLE,
   DEFAULT_EFFECTS,
   ROLE_COLORS,
   STARTER_ROLE_KEYWORDS,
@@ -168,6 +169,8 @@ type NormalizedTransform = ReturnType<typeof normalizeTransform>
 
 const firstVisibleFrameCache = new Map<string, Promise<number>>()
 const greenThumbFrameCache = new Map<string, string>()
+const MIN_PLAYBACK_RATE = 0.25
+const MAX_PLAYBACK_RATE = 4
 
 function App(): JSX.Element {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
@@ -197,7 +200,6 @@ function App(): JSX.Element {
   const [contextMenu, setContextMenu] = useState<TimelineContextMenu | null>(null)
   const [contextInput, setContextInput] = useState<ContextInputDialog | null>(null)
   const contextInputRef = useRef<HTMLInputElement | null>(null)
-  const [manualTotalFrames, setManualTotalFrames] = useState(0)
   const [showShortcutHelp, setShowShortcutHelp] = useState(false)
   const [clipClipboard, setClipClipboard] = useState<TimelineItem | null>(null)
   const [rightTab, setRightTab] = useState<RightTab>('templates')
@@ -248,9 +250,8 @@ function App(): JSX.Element {
 
   const totalFrames = useMemo(() => {
     if (!project || !currentPreset) return 300
-    const timelineMax = project.timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0)
-    return Math.max(timelineMax, currentPreset.fps * 10, manualTotalFrames)
-  }, [currentPreset, manualTotalFrames, project])
+    return projectDurationFrames(project, currentPreset.fps)
+  }, [currentPreset, project])
 
   const selectedItem = useMemo(
     () => project?.timeline.find((item) => item.id === selectedItemId) || null,
@@ -300,6 +301,10 @@ function App(): JSX.Element {
     () => findPreviewAudioItems(timelineLookup, playheadFrame, previewTrackGroup),
     [playheadFrame, previewTrackGroup, timelineLookup]
   )
+
+  useEffect(() => {
+    setPlayheadFrame((frame) => Math.min(frame, totalFrames))
+  }, [totalFrames])
 
   const filteredLocalAssets = useMemo(
     () =>
@@ -608,18 +613,12 @@ function App(): JSX.Element {
     setNotice('选择/移动工具：拖动画布元素或时间线片段进行调整')
   }
 
-  function addAssetToTimeline(asset: Asset, trackKind: TrackKind = asset.type === 'audio' ? 'music' : 'visual'): void {
+  function addAssetToTimeline(asset: Asset, trackKind?: TrackKind): void {
     if (!project || !currentPreset) return
-    const activeAudioTool = activeTool === 'audio' && (asset.type === 'audio' || hasNativeAudioHint(asset))
-    const activeStickerTool = activeTool === 'sticker' && isVisualAsset(asset)
-    const effectiveTrackKind: TrackKind = activeAudioTool ? 'sfx' : trackKind
-    const trackId = activeStickerTool
-      ? trackByGroupKind(project, 'effect', 'visual')?.id || trackIdForVisualAsset(project, asset, selectedItem)
-      : effectiveTrackKind === 'visual'
-        ? trackIdForVisualAsset(project, asset, selectedItem)
-        : trackIdForKind(project, effectiveTrackKind, selectedItem)
-    const startFrame = effectiveTrackKind === 'visual' ? playheadFrame : nextStartFrame(project, trackId)
-    addAssetToTimelineAt(asset, trackId, startFrame)
+    const trackId = trackIdForAssetDrop(project, asset, selectedItem, trackKind, activeTool)
+    const track = project.tracks.find((item) => item.id === trackId)
+    const startFrame = track?.kind === 'visual' ? playheadFrame : nextStartFrame(project, trackId)
+    addAssetToTimelineAt(asset, trackId, startFrame, undefined, { allowAutoTrack: true })
   }
 
   function addAssetToPurpose(asset: Asset, purpose: 'background' | 'role' | 'audio'): void {
@@ -644,33 +643,41 @@ function App(): JSX.Element {
       if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
       return
     }
-    const track = project.tracks.find((item) => item.id === (asset.type === 'audio' ? 'music' : 'sfx')) || project.tracks.find((item) => item.kind === 'sfx' || item.kind === 'music')
+    const audioKind: TrackKind = isBgmAsset(asset) ? 'music' : 'sfx'
+    const track = project.tracks.find((item) => item.id === trackIdForKind(project, audioKind, selectedItem)) || project.tracks.find((item) => item.kind === audioKind)
     if (track) addAssetToTimelineAt(asset, track.id, nextStartFrame(project, track.id))
   }
 
-  function addAssetToTimelineAt(asset: Asset, trackId: string, startFrame: number, transformOverride?: Partial<ReturnType<typeof normalizeTransform>>): void {
-    if (!project || !currentPreset) return
+  function addAssetToTimelineAt(
+    asset: Asset,
+    trackId: string,
+    startFrame: number,
+    transformOverride?: Partial<ReturnType<typeof normalizeTransform>>,
+    options: { allowAutoTrack?: boolean } = {}
+  ): boolean {
+    if (!project || !currentPreset) return false
     const requestedTrack = project.tracks.find((track) => track.id === trackId)
-    const requestedGroup = trackGroupId(requestedTrack)
-    const targetGroup = isVisualAsset(asset) ? visualTargetGroupForAsset(asset) : null
-    const resolvedTrackId = targetGroup
-      ? targetGroup === 'background'
-        ? backgroundTrackId(project)
-        : requestedTrack?.kind === 'visual' && requestedGroup !== 'background' && canPlaceAssetOnTrack(asset, requestedTrack.kind)
-          ? trackId
-          : trackByGroupKind(project, targetGroup, 'visual')?.id || trackId
-      : trackId
-    const track = project.tracks.find((track) => track.id === resolvedTrackId)
-    if (!track) return
+    const fallbackTrackId = trackIdForAssetDrop(project, asset, selectedItem, undefined, activeTool)
+    const track =
+      requestedTrack && (!options.allowAutoTrack || canDropAssetOnTimelineTrack(project, asset, requestedTrack))
+        ? requestedTrack
+        : options.allowAutoTrack
+          ? project.tracks.find((track) => track.id === fallbackTrackId)
+          : undefined
+    if (!track) {
+      setNotice(`没有可投放 ${assetDisplayName(asset)} 的轨道`)
+      return false
+    }
     if (track.locked) {
       setNotice(`${displayTrackName(track)} 已锁定，不能投放素材`)
-      return
+      return false
     }
-    if (!canPlaceAssetOnTrack(asset, track.kind)) {
-      setNotice(`${asset.filename} 不能放到 ${displayTrackName(track)}`)
-      return
+    if (!canDropAssetOnTimelineTrack(project, asset, track)) {
+      setNotice(assetDropBlockedMessage(asset, track))
+      return false
     }
     const trackKind = track.kind
+    const resolvedTrackId = track.id
     const durationFrames =
       asset.type === 'audio'
         ? Math.max(currentPreset.fps * 4, Math.round((asset.duration || 8) * currentPreset.fps))
@@ -681,10 +688,11 @@ function App(): JSX.Element {
       assetId: asset.id,
       type: trackKind,
       label: asset.title || asset.filename,
-      startFrame,
+      startFrame: Math.max(0, Math.round(startFrame)),
       durationFrames,
       sourceInFrame: 0,
-      effects: trackKind === 'visual' ? [DEFAULT_EFFECTS[1]] : [],
+      playbackRate: 1,
+      effects: defaultEffectsForTrackKind(trackKind),
       volume: trackKind === 'music' ? 0.35 : 1,
       loop: false,
       transform:
@@ -700,7 +708,7 @@ function App(): JSX.Element {
     })
     setSelectedItemId(item.id)
     if (trackKind === 'visual') setPlacementPulseItemId(item.id)
-    setPlayheadFrame(startFrame)
+    setPlayheadFrame(item.startFrame)
     if (trackKind === 'visual' && isGreenScreenAsset(asset)) {
       void detectFirstVisibleFrame(asset, currentPreset.fps, item.keying).then((sourceInFrame) => {
         if (sourceInFrame <= 0) return
@@ -716,6 +724,7 @@ function App(): JSX.Element {
         })
       })
     }
+    return true
   }
 
   function addAssetToPreview(assetId: string, clientX: number, clientY: number, stage: HTMLElement): void {
@@ -736,8 +745,9 @@ function App(): JSX.Element {
       x: Math.round(((clientX - bounds.left) / bounds.width - 0.5) * currentPreset.width),
       y: Math.round(((clientY - bounds.top) / bounds.height - 0.5) * currentPreset.height)
     }
-    addAssetToTimelineAt(asset, trackId, playheadFrame, transform)
-    setNotice(`已拖入画面：${asset.title || asset.filename}`)
+    if (addAssetToTimelineAt(asset, trackId, playheadFrame, transform, { allowAutoTrack: true })) {
+      setNotice(`已拖入画面：${asset.title || asset.filename}`)
+    }
   }
 
   function applyTemplate(template: CatMemeTemplate): void {
@@ -776,9 +786,6 @@ function App(): JSX.Element {
         sourceInFrame: 0,
         effects: [],
         text: lines[index] || `猫猫镜头 ${index + 1}`,
-        speakerName: index % 2 === 0 ? '猫猫A' : '猫猫B',
-        speakerVisible: true,
-        speakerPosition: 'bottom',
         style: template.subtitleStyle
       })
       cursor += durationFrames
@@ -798,7 +805,7 @@ function App(): JSX.Element {
     if (!project || !currentPreset) return
     const lines = scriptLines(project.script)
     if (!lines.length) return
-    const total = Math.max(project.timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0), currentPreset.fps * 8)
+    const total = Math.max(projectDurationFrames(project, currentPreset.fps), currentPreset.fps * 8)
     const durationFrames = Math.max(currentPreset.fps, Math.floor(total / lines.length))
     const subtitles = lines.map<TimelineItem>((text, index) => ({
       id: crypto.randomUUID(),
@@ -810,9 +817,6 @@ function App(): JSX.Element {
       sourceInFrame: 0,
       effects: [],
       text,
-      speakerName: index % 2 === 0 ? '猫猫A' : '猫猫B',
-      speakerVisible: true,
-      speakerPosition: 'bottom',
       style: project.subtitleStyle
     }))
     updateProject({
@@ -1200,8 +1204,9 @@ function App(): JSX.Element {
       startFrame: playheadFrame,
       durationFrames,
       sourceInFrame: 0,
-      effects: [DEFAULT_EFFECTS[1]],
+      effects: defaultEffectsForTrackKind('visual'),
       volume: 1,
+      roleLabel: createRoleLabel(role, true),
       transform: role.defaultTransform,
       keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
     }
@@ -1379,7 +1384,7 @@ function App(): JSX.Element {
       ...item,
       id: crypto.randomUUID(),
       startFrame: frame,
-      sourceInFrame: item.sourceInFrame + localFrame,
+      sourceInFrame: item.sourceInFrame + Math.round(localFrame * itemPlaybackRate(item)),
       durationFrames: item.durationFrames - localFrame,
       label: `${item.label} B`,
       keyframes: keyframeParts.second
@@ -1401,7 +1406,7 @@ function App(): JSX.Element {
     updateSelectedItem({
       startFrame: playheadFrame,
       durationFrames: selectedItem.durationFrames - delta,
-      sourceInFrame: selectedItem.sourceInFrame + delta
+      sourceInFrame: selectedItem.sourceInFrame + Math.round(delta * itemPlaybackRate(selectedItem))
     })
   }
 
@@ -1548,7 +1553,7 @@ function App(): JSX.Element {
       const itemEnd = selectedItem.startFrame + selectedItem.durationFrames
       const segmentStart = clampNumber(playheadFrame, selectedItem.startFrame, itemEnd - 1)
       const segmentDuration = Math.max(1, Math.min(Math.round(currentPreset.fps * 0.5), itemEnd - segmentStart))
-      const sourceInFrame = selectedItem.sourceInFrame + (segmentStart - selectedItem.startFrame)
+      const sourceInFrame = selectedItem.sourceInFrame + Math.round((segmentStart - selectedItem.startFrame) * itemPlaybackRate(selectedItem))
       const segmentTransform = visualTransformAtFrame(selectedItem, segmentStart - selectedItem.startFrame)
       const copies = [1, 2].map((index) => ({
         ...selectedItem,
@@ -1582,12 +1587,13 @@ function App(): JSX.Element {
   }
 
   function addContextName(item: TimelineItem): void {
+    if (item.type !== 'visual') return
     setContextInput({
       itemId: item.id,
       kind: 'name',
       x: contextMenu?.x || window.innerWidth / 2,
       y: contextMenu?.y || window.innerHeight / 2,
-      value: item.speakerName || item.label || ''
+      value: roleLabelForItem(project, item).text || item.label || ''
     })
   }
 
@@ -1656,7 +1662,12 @@ function App(): JSX.Element {
     const value = contextInput.value.trim()
     if (!value) return
     if (contextInput.kind === 'name') {
-      upsertContextSubtitle(contextInputItem, { speakerName: value, speakerVisible: true })
+      if (contextInputItem.type === 'visual') {
+        moveTimelineItem(contextInputItem.id, {
+          roleLabel: mergeRoleLabelPatch(project, contextInputItem, { text: value, visible: true })
+        })
+        setNotice('已绑定角色名称')
+      }
     } else {
       upsertContextSubtitle(contextInputItem, { text: value, style: project.subtitleStyle })
     }
@@ -1709,7 +1720,26 @@ function App(): JSX.Element {
   }
 
   function updateProject(nextProject: ProjectFile): void {
-    setProject({ ...nextProject, tracks: normalizeProjectTracks(nextProject.tracks), updatedAt: new Date().toISOString() })
+    const fps = currentPreset?.fps || 30
+    setProject({
+      ...nextProject,
+      tracks: normalizeProjectTracks(nextProject.tracks),
+      durationSeconds: normalizeProjectDurationSeconds(nextProject, fps),
+      updatedAt: new Date().toISOString()
+    })
+  }
+
+  function setProjectDurationFrames(frames: number): void {
+    if (!project || !currentPreset) return
+    const minFrames = Math.max(projectContentEndFrame(project), currentPreset.fps)
+    const nextFrames = Math.max(minFrames, Math.round(frames))
+    updateProject({ ...project, durationSeconds: secondsFromFrames(nextFrames, currentPreset.fps) })
+    setPlayheadFrame((frame) => Math.min(frame, nextFrames))
+  }
+
+  function setProjectDurationSeconds(seconds: number): void {
+    if (!currentPreset) return
+    setProjectDurationFrames(Math.round(seconds * currentPreset.fps))
   }
 
   function addAssetsToProject(assets: Asset[]): void {
@@ -1849,12 +1879,15 @@ function App(): JSX.Element {
                 </button>
                 <IconButton title="前进一帧 →" onClick={() => jumpFrames(1)} icon={<StepForward />} />
                 <IconButton title="到结尾 End" onClick={() => setPlayheadFrame(totalFrames)} icon={<FastForward />} />
-                <select className="speed-select" value={playerSpeed} onChange={(event) => setPlayerSpeed(Number(event.target.value))}>
-                  <option value={0.5}>0.5x</option>
-                  <option value={1}>1x</option>
-                  <option value={2}>2x</option>
-                  <option value={4}>4x</option>
-                </select>
+                <label className="preview-speed-control">
+                  <span>预览速度</span>
+                  <select className="speed-select" value={playerSpeed} onChange={(event) => setPlayerSpeed(Number(event.target.value))}>
+                    <option value={0.5}>0.5x</option>
+                    <option value={1}>1x</option>
+                    <option value={2}>2x</option>
+                    <option value={4}>4x</option>
+                  </select>
+                </label>
               </div>
               <MemeActionStrip selectedItem={selectedItem} onAction={applyMemeAction} />
             </div>
@@ -1892,10 +1925,27 @@ function App(): JSX.Element {
               <PanelTitle icon={<SlidersHorizontal />} title="时间轴" />
               <div className="frame-readout">
                 <span>总时长 {formatTime(totalFrames, currentPreset.fps)}</span>
+                <div className="duration-quick-controls" aria-label="工程总时长">
+                  {[15, 30, 60].map((seconds) => (
+                    <button className="mini-link" type="button" key={seconds} onClick={() => setProjectDurationSeconds(seconds)}>
+                      {seconds}s
+                    </button>
+                  ))}
+                  <label className="duration-input">
+                    <span>工程秒</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={Math.round(totalFrames / currentPreset.fps)}
+                      onChange={(event) => setProjectDurationSeconds(Number(event.target.value) || 1)}
+                    />
+                  </label>
+                </div>
                 <span>{currentPreset.fps}fps</span>
                 <span>Frame {playheadFrame}</span>
                 <span>{formatTime(playheadFrame, currentPreset.fps)}</span>
-                <span>缩放 {Math.round(timelineZoom * 100)}%</span>
+                <span>缩放视图 {Math.round(timelineZoom * 100)}%</span>
                 <button className={timelineSnapEnabled ? 'mini-link active' : 'mini-link'} onClick={() => setTimelineSnapEnabled((value) => !value)} title="磁吸贴边">
                   <Magnet size={13} />
                   磁吸
@@ -1941,7 +1991,7 @@ function App(): JSX.Element {
             onActiveGroupChange={changeActiveTrackGroup}
             onSoloGroupChange={setSoloTrackGroup}
             onSelectGroupItems={selectTrackGroupItems}
-            onTotalFramesChange={(frames) => setManualTotalFrames(Math.max(frames, currentPreset.fps * 10))}
+            onTotalFramesChange={setProjectDurationFrames}
             timelineZoom={timelineZoom}
             onTimelineZoom={setTimelineZoom}
             snapEnabled={timelineSnapEnabled}
@@ -1952,7 +2002,11 @@ function App(): JSX.Element {
             onItemContextMenu={openItemContextMenu}
             onDropAsset={(assetId, trackId, frame) => {
               const asset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
-              if (asset) addAssetToTimelineAt(asset, trackId, frame)
+              return asset ? addAssetToTimelineAt(asset, trackId, frame) : false
+            }}
+            onDropAssetToDefaultTrack={(assetId, frame) => {
+              const asset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
+              return asset ? addAssetToTimelineAt(asset, trackIdForAssetDrop(project, asset, selectedItem, undefined, activeTool), frame, undefined, { allowAutoTrack: true }) : false
             }}
           />
         </section>
@@ -1969,6 +2023,7 @@ function App(): JSX.Element {
             lastExport={lastExport}
             onPatchTrack={patchTrack}
             onPatchItem={updateSelectedItem}
+            onProjectDurationChange={setProjectDurationSeconds}
             onSeek={setPlayheadFrame}
             onSplit={splitSelectedItem}
             onDelete={deleteSelectedItem}
@@ -2002,7 +2057,7 @@ function App(): JSX.Element {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <button onClick={() => { addContextName(contextMenuItem); setContextMenu(null) }}>
+          <button disabled={contextMenuItem.type !== 'visual'} onClick={() => { addContextName(contextMenuItem); setContextMenu(null) }}>
             <Captions size={14} />
             添加名称
           </button>
@@ -2341,7 +2396,7 @@ function ShortcutStrip(): JSX.Element {
       <span>[ / ] 裁剪到播放头</span>
       <span>Ctrl+C/V 复制粘贴</span>
       <span>Alt+←/→ 微移</span>
-      <span>Ctrl+滚轮 缩放</span>
+      <span>Ctrl+滚轮 缩放视图</span>
       <span>V 选择</span>
       <span>C 剃刀</span>
       <span>T 文字</span>
@@ -2389,9 +2444,9 @@ function LocalAssetCard({
       }}
       onContextMenu={(event) => {
         event.preventDefault()
-        onAdd(asset, isAudio ? 'music' : 'visual')
+        onAdd(asset)
       }}
-      onDoubleClick={() => onAdd(asset, isAudio ? 'music' : 'visual')}
+      onDoubleClick={() => onAdd(asset)}
       title="拖到预览画面或时间轴；右键加入当前帧"
     >
       <div className="asset-thumb-wrap">
@@ -2410,7 +2465,7 @@ function LocalAssetCard({
         {viewMode === 'list' && <span>{asset.license}</span>}
       </div>
       <div className="asset-actions">
-        <IconButton title={isAudio ? '加入 BGM' : '加入画面'} onClick={() => onAdd(asset, isAudio ? 'music' : 'visual')} icon={isAudio ? <Music2 /> : <ImageIcon />} />
+        <IconButton title={isAudio ? '加入音频轨' : '加入画面'} onClick={() => onAdd(asset)} icon={isAudio ? <Music2 /> : <ImageIcon />} />
         {!isAudio && (
           <>
             <button className="asset-quick" onClick={() => onAddToPurpose(asset, 'background')}>
@@ -3076,6 +3131,7 @@ function QuickPreview({
         return (
           <QuickPreviewLayer
             key={item.id}
+            project={project}
             item={item}
             asset={asset}
             selected={selectedItemId === item.id}
@@ -3085,6 +3141,7 @@ function QuickPreview({
             presetWidth={presetWidth}
             presetHeight={presetHeight}
             isPlaying={isPlaying}
+            playbackRate={playbackRate}
             activeTool={activeTool}
             locked={Boolean(track?.locked)}
             onSelect={onSelect}
@@ -3298,6 +3355,7 @@ function QuickPreviewTextLayer({
 }
 
 function QuickPreviewLayer({
+  project,
   item,
   asset,
   selected,
@@ -3307,12 +3365,14 @@ function QuickPreviewLayer({
   presetWidth,
   presetHeight,
   isPlaying,
+  playbackRate,
   activeTool,
   locked,
   onSelect,
   onPatchItem,
   onItemContextMenu
 }: {
+  project: ProjectFile
   item: TimelineItem
   asset: Asset
   selected: boolean
@@ -3322,6 +3382,7 @@ function QuickPreviewLayer({
   presetWidth: number
   presetHeight: number
   isPlaying: boolean
+  playbackRate: number
   activeTool: EditorToolId
   locked: boolean
   onSelect: (id: string) => void
@@ -3360,6 +3421,8 @@ function QuickPreviewLayer({
     ...(effectState.filter ? { filter: effectState.filter } : {})
   }
   const canTransform = selected && (activeTool === 'select' || activeTool === 'text') && !locked
+  const roleLabel = roleLabelForItem(project, item)
+  const showRoleLabel = Boolean(roleLabel.visible && roleLabel.text.trim())
 
   useEffect(() => {
     itemRef.current = item
@@ -3497,6 +3560,7 @@ function QuickPreviewLayer({
   useEffect(() => {
     const video = videoRef.current
     if (!video || mediaType !== 'video') return
+    video.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
     if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
       video.currentTime = Math.max(0, currentSeconds)
     }
@@ -3505,7 +3569,7 @@ function QuickPreviewLayer({
     } else {
       video.pause()
     }
-  }, [currentSeconds, isPlaying, mediaType])
+  }, [asset, currentSeconds, isPlaying, item, mediaType, playbackRate])
 
   let content: JSX.Element | null = null
   if (!mediaSrc) return <></>
@@ -3516,6 +3580,7 @@ function QuickPreviewLayer({
         item={item}
         currentSeconds={currentSeconds}
         isPlaying={isPlaying}
+        playbackRate={playbackRate}
         measureBounds={selected || !isPlaying}
         onMediaSize={setMediaSize}
         onVisibleBounds={updateVisibleBounds}
@@ -3532,6 +3597,20 @@ function QuickPreviewLayer({
   return (
     <div className="preview-layer" style={style}>
       {content}
+      {showRoleLabel && (
+        <div
+          className="preview-role-label"
+          style={previewRoleLabelPositionStyle(roleLabel.style.position, visibleBounds)}
+          onPointerDown={beginStageDrag}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onItemContextMenu(item.id, event.clientX, event.clientY)
+          }}
+        >
+          <span style={previewRoleLabelCss(roleLabel.style, effectState.transform)}>{roleLabel.text}</span>
+        </div>
+      )}
       <div
         className={`preview-hitbox ${selected ? 'selected' : ''} ${recentlyPlaced ? 'recently-placed' : ''} ${locked ? 'locked' : ''}`}
         style={visibleBoundsStyle(visibleBounds)}
@@ -3607,7 +3686,7 @@ function PreviewAudioElement({
     const audio = audioRef.current
     if (!audio) return
     audio.volume = clampNumber(item.volume ?? (item.type === 'music' ? 0.35 : 1), 0, 1)
-    audio.playbackRate = clampNumber(playbackRate, 0.25, 4)
+    audio.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
     if (Math.abs(audio.currentTime - currentSeconds) > 0.35) {
       audio.currentTime = currentSeconds
     }
@@ -3616,7 +3695,7 @@ function PreviewAudioElement({
     } else {
       audio.pause()
     }
-  }, [asset.fileUrl, currentSeconds, isPlaying, item.type, item.volume, playbackRate])
+  }, [asset, currentSeconds, isPlaying, item, playbackRate])
 
   return <audio ref={audioRef} src={asset.fileUrl} preload="auto" />
 }
@@ -3626,6 +3705,7 @@ function KeyedMediaCanvas({
   item,
   currentSeconds,
   isPlaying,
+  playbackRate,
   measureBounds,
   onMediaSize,
   onVisibleBounds
@@ -3634,6 +3714,7 @@ function KeyedMediaCanvas({
   item: TimelineItem
   currentSeconds: number
   isPlaying: boolean
+  playbackRate: number
   measureBounds: boolean
   onMediaSize: (size: { width: number; height: number }) => void
   onVisibleBounds: (bounds: VisibleBounds) => void
@@ -3647,6 +3728,7 @@ function KeyedMediaCanvas({
   useEffect(() => {
     const video = videoRef.current
     if (!video || asset.type !== 'video') return
+    video.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
     if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
       video.currentTime = Math.max(0, currentSeconds)
     }
@@ -3655,7 +3737,7 @@ function KeyedMediaCanvas({
     } else {
       video.pause()
     }
-  }, [asset.type, currentSeconds, isPlaying])
+  }, [asset, currentSeconds, isPlaying, item, playbackRate])
 
   useEffect(() => {
     let frame = 0
@@ -3727,6 +3809,7 @@ function PropertyInspector({
   lastExport,
   onPatchTrack,
   onPatchItem,
+  onProjectDurationChange,
   onSeek,
   onSplit,
   onDelete
@@ -3741,6 +3824,7 @@ function PropertyInspector({
   lastExport: RenderResult | null
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
   onPatchItem: (patch: Partial<TimelineItem>) => void
+  onProjectDurationChange: (seconds: number) => void
   onSeek: (frame: number) => void
   onSplit: () => void
   onDelete: () => void
@@ -3751,6 +3835,7 @@ function PropertyInspector({
       <div className="property-section">
         {selectedItem ? (
           <SelectedInspector
+            project={project}
             item={selectedItem}
             fps={fps}
             playheadFrame={playheadFrame}
@@ -3760,7 +3845,7 @@ function PropertyInspector({
             onDelete={onDelete}
           />
         ) : (
-          <ProjectOverviewInspector project={project} preset={preset} totalFrames={totalFrames} fps={fps} lastExport={lastExport} />
+          <ProjectOverviewInspector project={project} preset={preset} totalFrames={totalFrames} fps={fps} lastExport={lastExport} onDurationChange={onProjectDurationChange} />
         )}
       </div>
     </div>
@@ -3787,7 +3872,7 @@ function TrackInspector({
 
   const groupId = trackGroupId(track)
   const group = trackGroupDefinition(groupId)
-  const itemCount = project.timeline.filter((item) => item.trackId === track.id).length
+  const itemCount = project.timeline.filter((item) => item.trackId === track.id && isTimelineCountItem(item)).length
   const outputLabel = track.kind === 'visual' || track.kind === 'subtitle' ? '画面输出' : '声音输出'
   const groupOptions = TRACK_GROUPS.filter((option) => canMoveTrackToGroup(track, option.id))
 
@@ -3836,6 +3921,7 @@ function TrackInspector({
 }
 
 function SelectedInspector({
+  project,
   item,
   fps,
   playheadFrame,
@@ -3844,6 +3930,7 @@ function SelectedInspector({
   onSplit,
   onDelete
 }: {
+  project: ProjectFile
   item: TimelineItem | null
   fps: number
   playheadFrame: number
@@ -3861,6 +3948,7 @@ function SelectedInspector({
     )
   }
   const effect = item.effects[0] || DEFAULT_EFFECTS[0]
+  const canRateStretch = isRateStretchItem(item, project.assets)
   return (
     <section className="inspector">
       <PanelTitle icon={<SlidersHorizontal />} title="片段" />
@@ -3870,8 +3958,21 @@ function SelectedInspector({
       </label>
       <div className="number-grid">
         <NumberField label="起始帧" value={item.startFrame} onChange={(value) => onPatch({ startFrame: value })} />
-        <NumberField label="时长帧" value={item.durationFrames} onChange={(value) => onPatch({ durationFrames: Math.max(1, value) })} />
+        <NumberField label="显示时长帧" value={item.durationFrames} onChange={(value) => onPatch({ durationFrames: Math.max(1, value) })} />
         <NumberField label="入点帧" value={item.sourceInFrame} onChange={(value) => onPatch({ sourceInFrame: Math.max(0, value) })} />
+        {canRateStretch && (
+          <label className="field compact">
+            <span>变速</span>
+            <input
+              type="number"
+              min={MIN_PLAYBACK_RATE}
+              max={MAX_PLAYBACK_RATE}
+              step={0.05}
+              value={itemPlaybackRate(item)}
+              onChange={(event) => onPatch({ playbackRate: clampNumber(Number(event.target.value) || 1, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE) })}
+            />
+          </label>
+        )}
         <NumberField label="音量" value={Math.round((item.volume ?? 1) * 100)} onChange={(value) => onPatch({ volume: value / 100 })} />
       </div>
       {item.type !== 'subtitle' && (
@@ -3908,6 +4009,7 @@ function SelectedInspector({
               ))}
             </select>
           </label>
+          <RoleLabelInspector project={project} item={item} onPatch={onPatch} />
           <VisualKeyframeEditor item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} onSeek={onSeek} />
           <VisualTransformEditor item={item} playheadFrame={playheadFrame} onPatch={onPatch} />
           <VisualKeyingEditor item={item} onPatch={onPatch} />
@@ -3933,21 +4035,24 @@ function ProjectOverviewInspector({
   preset,
   totalFrames,
   fps,
-  lastExport
+  lastExport,
+  onDurationChange
 }: {
   project: ProjectFile
   preset: ExportPreset
   totalFrames: number
   fps: number
   lastExport: RenderResult | null
+  onDurationChange: (seconds: number) => void
 }): JSX.Element {
   const timelineAssetIds = new Set(project.timeline.map((item) => item.assetId).filter(Boolean))
   const projectAssetIds = new Set(project.assets.map((asset) => asset.id))
   const missingCount = [...timelineAssetIds].filter((assetId) => !projectAssetIds.has(String(assetId))).length
   const visualCount = project.timeline.filter((item) => item.type === 'visual').length
-  const subtitleCount = project.timeline.filter((item) => item.type === 'subtitle').length
+  const subtitleCount = project.timeline.filter((item) => item.type === 'subtitle' && isTimelineCountItem(item)).length
   const audioCount = project.timeline.filter((item) => ['voice', 'music', 'sfx'].includes(item.type)).length
   const mutedTracks = project.tracks.filter((track) => track.muted).length
+  const minimumSeconds = Math.max(1, Math.ceil(projectContentEndFrame(project) / fps))
 
   return (
     <section className="inspector project-overview-inspector">
@@ -3962,6 +4067,16 @@ function ProjectOverviewInspector({
         <Metric label="字幕" value={String(subtitleCount)} />
         <Metric label="音频" value={String(audioCount)} />
       </div>
+      <label className="field compact">
+        <span>工程总时长（秒）</span>
+        <input
+          type="number"
+          min={minimumSeconds}
+          step={1}
+          value={Math.round(totalFrames / fps)}
+          onChange={(event) => onDurationChange(Number(event.target.value) || minimumSeconds)}
+        />
+      </label>
       <div className={missingCount ? 'quality-card warning' : 'quality-card ok'}>
         <strong>{missingCount ? '需要处理' : '状态良好'}</strong>
         <span>{missingCount ? `有 ${missingCount} 个时间线素材未找到` : '时间线素材完整，可以继续剪辑或导出。'}</span>
@@ -4013,7 +4128,8 @@ function Timeline({
   onRazorModeChange,
   onCutItemAtFrame,
   onItemContextMenu,
-  onDropAsset
+  onDropAsset,
+  onDropAssetToDefaultTrack
 }: {
   project: ProjectFile
   availableAssets: Asset[]
@@ -4045,10 +4161,11 @@ function Timeline({
   onRazorModeChange: (value: boolean) => void
   onCutItemAtFrame: (itemId: string, frame: number) => void
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
-  onDropAsset: (assetId: string, trackId: string, frame: number) => void
+  onDropAsset: (assetId: string, trackId: string, frame: number) => boolean
+  onDropAssetToDefaultTrack: (assetId: string, frame: number) => boolean
 }): JSX.Element {
   const [dragState, setDragState] = useState<{
-    mode: 'move' | 'trim-start' | 'trim-end'
+    mode: 'move' | 'rate-start' | 'rate-end'
     item: TimelineItem
     startX: number
     startFrame: number
@@ -4110,18 +4227,12 @@ function Timeline({
           startFrame: Math.max(0, activeDrag.startFrame + deltaFrames),
           ...(trackId && canMoveItemToTrack(currentProject, activeDrag.item, trackId) ? { trackId } : {})
         }
-      } else if (activeDrag.mode === 'trim-start') {
-        const maxDelta = activeDrag.durationFrames - 1
-        const appliedDelta = Math.max(-activeDrag.startFrame, Math.min(deltaFrames, maxDelta))
-        patch = {
-          startFrame: activeDrag.startFrame + appliedDelta,
-          durationFrames: activeDrag.durationFrames - appliedDelta,
-          sourceInFrame: Math.max(0, activeDrag.sourceInFrame + appliedDelta)
-        }
+      } else if (activeDrag.mode === 'rate-start') {
+        const rightEdge = activeDrag.startFrame + activeDrag.durationFrames
+        const startFrame = clampNumber(activeDrag.startFrame + deltaFrames, 0, rightEdge - 1)
+        patch = buildRateStretchPatch(activeDrag.item, availableAssets, activeDrag.startFrame, activeDrag.durationFrames, startFrame, rightEdge - startFrame, 'start')
       } else {
-        patch = {
-          durationFrames: Math.max(1, activeDrag.durationFrames + deltaFrames)
-        }
+        patch = buildRateStretchPatch(activeDrag.item, availableAssets, activeDrag.startFrame, activeDrag.durationFrames, activeDrag.startFrame, activeDrag.durationFrames + deltaFrames, 'end')
       }
 
       if (snapEnabled && !event.altKey) {
@@ -4132,12 +4243,23 @@ function Timeline({
           patch,
           startFrame: activeDrag.startFrame,
           durationFrames: activeDrag.durationFrames,
-          sourceInFrame: activeDrag.sourceInFrame,
           trackId: patch.trackId || activeDrag.item.trackId,
           playheadFrame,
           rulerFrames: rulerTicks.map((tick) => tick.frame),
           thresholdFrames: snapThresholdFrames(activeDrag.laneWidth, totalFrames, fps)
         })
+      }
+
+      if (activeDrag.mode !== 'move') {
+        patch = buildRateStretchPatch(
+          activeDrag.item,
+          availableAssets,
+          activeDrag.startFrame,
+          activeDrag.durationFrames,
+          patch.startFrame ?? activeDrag.startFrame,
+          patch.durationFrames ?? activeDrag.durationFrames,
+          activeDrag.mode === 'rate-start' ? 'start' : 'end'
+        )
       }
 
       schedulePatch(patch)
@@ -4158,7 +4280,7 @@ function Timeline({
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
     }
-  }, [dragState, fps, playheadFrame, rulerTicks, snapEnabled, totalFrames])
+  }, [availableAssets, dragState, fps, playheadFrame, rulerTicks, snapEnabled, totalFrames])
 
   useEffect(() => {
     if (!durationDrag) return
@@ -4166,7 +4288,7 @@ function Timeline({
 
     function onPointerMove(event: globalThis.PointerEvent): void {
       const deltaFrames = Math.round(((event.clientX - activeDrag.startX) / Math.max(1, activeDrag.laneWidth)) * totalFrames)
-      onTotalFramesChange(Math.max(fps * 4, activeDrag.startFrames + deltaFrames))
+      onTotalFramesChange(Math.max(fps, activeDrag.startFrames + deltaFrames))
     }
 
     function onPointerUp(): void {
@@ -4229,6 +4351,15 @@ function Timeline({
     return event.dataTransfer.getData('application/x-cat-meme-asset') || event.dataTransfer.getData('text/plain')
   }
 
+  function isTimelineBlankDropTarget(target: EventTarget | null): boolean {
+    return target instanceof HTMLElement && !target.closest('.track-lane, .track-label, .timeline-item, .track-group-controls')
+  }
+
+  function frameFromTimelineDrop(element: HTMLElement, clientX: number): number {
+    const rulerLane = element.querySelector<HTMLElement>('.ruler-lane')
+    return frameFromClientX(rulerLane || element, clientX)
+  }
+
   function assetDropDuration(asset: Asset): number {
     const seconds = asset.type === 'audio' ? asset.duration || 4 : asset.duration || 2.4
     return Math.max(fps, Math.round(seconds * fps))
@@ -4279,14 +4410,34 @@ function Timeline({
     event.dataTransfer.dropEffect = track.locked || !canDropAssetOnTimelineTrack(project, asset, track) ? 'none' : 'copy'
   }
 
-  function handleAssetDrop(event: DragEvent<HTMLDivElement>, trackId: string): void {
-    event.preventDefault()
-    const track = project.tracks.find((track) => track.id === trackId)
-    if (!track?.id || track.locked) return
+  function handleAssetTrackLabelDragOver(event: DragEvent<HTMLDivElement>, track: TimelineTrack): void {
+    if (dragHasType(event, TRACK_DRAG_MIME)) return
     const assetId = assetIdFromDrag(event)
     if (!assetId) return
     const asset = availableAssets.find((item) => item.id === assetId)
-    if (!asset || !canDropAssetOnTimelineTrack(project, asset, track)) {
+    if (!asset) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = track.locked || !canDropAssetOnTimelineTrack(project, asset, track) ? 'none' : 'copy'
+    setTrackDropTarget(track.id)
+  }
+
+  function handleAssetTrackLabelDrop(event: DragEvent<HTMLDivElement>, track: TimelineTrack): void {
+    if (dragHasType(event, TRACK_DRAG_MIME)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const assetId = assetIdFromDrag(event)
+    if (assetId) onDropAsset(assetId, track.id, playheadFrame)
+    setTrackDropTarget(null)
+  }
+
+  function handleAssetDrop(event: DragEvent<HTMLDivElement>, trackId: string): void {
+    event.preventDefault()
+    event.stopPropagation()
+    const assetId = assetIdFromDrag(event)
+    if (!assetId) return
+    const asset = availableAssets.find((item) => item.id === assetId)
+    if (!asset) {
       setAssetDropPreview(null)
       return
     }
@@ -4295,7 +4446,24 @@ function Timeline({
     setAssetDropPreview(null)
   }
 
-  function beginDrag(event: PointerEvent<HTMLElement>, item: TimelineItem, mode: 'move' | 'trim-start' | 'trim-end'): void {
+  function handleTimelineBlankDragOver(event: DragEvent<HTMLDivElement>): void {
+    if (dragHasType(event, TRACK_DRAG_MIME) || !isTimelineBlankDropTarget(event.target)) return
+    const assetId = assetIdFromDrag(event)
+    if (!assetId || !availableAssets.some((item) => item.id === assetId)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function handleTimelineBlankDrop(event: DragEvent<HTMLDivElement>): void {
+    if (dragHasType(event, TRACK_DRAG_MIME) || !isTimelineBlankDropTarget(event.target)) return
+    event.preventDefault()
+    const assetId = assetIdFromDrag(event)
+    if (!assetId) return
+    onDropAssetToDefaultTrack(assetId, frameFromTimelineDrop(event.currentTarget, event.clientX))
+    setAssetDropPreview(null)
+  }
+
+  function beginDrag(event: PointerEvent<HTMLElement>, item: TimelineItem, mode: 'move' | 'rate-start' | 'rate-end'): void {
     event.preventDefault()
     event.stopPropagation()
     const track = project.tracks.find((track) => track.id === item.trackId)
@@ -4343,16 +4511,21 @@ function Timeline({
         onTimelineZoom(clampNumber(timelineZoom * (event.deltaY < 0 ? 1.12 : 0.88), 1, 4))
       }}
     >
-      <div className="timeline-scale" style={{ width: `${timelineZoom * 100}%` }}>
+      <div
+        className="timeline-scale"
+        style={{ width: `${timelineZoom * 100}%` }}
+        onDragOver={handleTimelineBlankDragOver}
+        onDrop={handleTimelineBlankDrop}
+      >
         <div className="track-group-tabs">
           <button className={activeGroup === 'all' ? 'track-group-tab active' : 'track-group-tab'} onClick={() => onActiveGroupChange('all')}>
             <Layers size={14} />
             全部
-            <span>{project.timeline.length}</span>
+            <span>{project.timeline.filter(isTimelineCountItem).length}</span>
           </button>
           {TRACK_GROUPS.map((group) => {
             const groupTrackIds = new Set(project.tracks.filter((track) => trackGroupId(track) === group.id).map((track) => track.id))
-            const count = project.timeline.filter((item) => groupTrackIds.has(item.trackId)).length
+            const count = project.timeline.filter((item) => groupTrackIds.has(item.trackId) && isTimelineCountItem(item)).length
             return (
               <button
                 key={group.id}
@@ -4389,13 +4562,13 @@ function Timeline({
                 {tick.label}
               </span>
             ))}
-            <button className="project-end-handle" style={{ left: '100%' }} title="拖动延长时间轴" onPointerDown={beginDurationDrag} />
+            <button className="project-end-handle" style={{ left: '100%' }} title="拖动设置工程总时长" onPointerDown={beginDurationDrag} />
           </div>
         </div>
         {visibleGroups.map((group) => {
           const tracks = project.tracks.filter((track) => trackGroupId(track) === group.id)
           const trackIds = new Set(tracks.map((track) => track.id))
-          const groupItems = project.timeline.filter((item) => trackIds.has(item.trackId))
+          const groupItems = project.timeline.filter((item) => trackIds.has(item.trackId) && isTimelineCountItem(item))
           const allLocked = tracks.length > 0 && tracks.every((track) => track.locked)
           const allMuted = tracks.length > 0 && tracks.every((track) => track.muted)
           return (
@@ -4439,7 +4612,14 @@ function Timeline({
                     onDragLeave={() => setTrackDropTarget((current) => (current === track.id ? null : current))}
                     onDrop={(event) => handleTrackDrop(event, track)}
                   >
-                    <div className="track-label" title={displayTrackName(track)} onPointerDown={() => onSelectTrack(track.id)}>
+                    <div
+                      className="track-label"
+                      title={displayTrackName(track)}
+                      onPointerDown={() => onSelectTrack(track.id)}
+                      onDragOver={(event) => handleAssetTrackLabelDragOver(event, track)}
+                      onDragLeave={() => setTrackDropTarget((current) => (current === track.id ? null : current))}
+                      onDrop={(event) => handleAssetTrackLabelDrop(event, track)}
+                    >
                       <div className="track-name-block">
                         <span
                           className="track-drag-handle"
@@ -4517,11 +4697,11 @@ function Timeline({
                             event.stopPropagation()
                             onItemContextMenu(item.id, event.clientX, event.clientY)
                           }}
-                          title={`${item.label} · ${item.durationFrames} 帧`}
+                          title={timelineItemTitle(item, availableAssets)}
                         >
-                          <span className="resize-handle left" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'trim-start'))} />
+                          <span className="resize-handle left" title="变速拉伸片段左边缘" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'rate-start'))} />
                           <span>{item.label}</span>
-                          <span className="resize-handle right" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'trim-end'))} />
+                          <span className="resize-handle right" title="变速拉伸片段右边缘" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'rate-end'))} />
                         </button>
                       ))}
                     </div>
@@ -4715,6 +4895,72 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   )
 }
 
+function RoleLabelInspector({
+  project,
+  item,
+  onPatch
+}: {
+  project: ProjectFile
+  item: TimelineItem
+  onPatch: (patch: Partial<TimelineItem>) => void
+}): JSX.Element {
+  const label = roleLabelForItem(project, item)
+  const patchLabel = (patch: NonNullable<TimelineItem['roleLabel']>): void => {
+    onPatch({ roleLabel: mergeRoleLabelPatch(project, item, patch) })
+  }
+  const patchStyle = (patch: Partial<ProjectFile['subtitleStyle']>): void => {
+    patchLabel({ style: { ...label.style, ...patch } })
+  }
+
+  return (
+    <div className="transform-editor role-label-editor">
+      <div className="panel-title mini">
+        <Captions />
+        <strong>角色名称</strong>
+      </div>
+      <label className="field compact">
+        <span>名称</span>
+        <input
+          value={label.text}
+          onChange={(event) => patchLabel({ text: event.target.value, visible: item.roleLabel?.visible ?? true })}
+        />
+      </label>
+      <label className="toggle-field">
+        <input type="checkbox" checked={label.visible} onChange={(event) => patchLabel({ visible: event.target.checked })} />
+        <span>显示名称</span>
+      </label>
+      <div className="number-grid">
+        <label className="field compact">
+          <span>位置</span>
+          <select value={label.style.position} onChange={(event) => patchStyle({ position: event.target.value as ProjectFile['subtitleStyle']['position'] })}>
+            <option value="top">上方</option>
+            <option value="middle">中间</option>
+            <option value="bottom">下方</option>
+          </select>
+        </label>
+        <NumberField label="字号" value={label.style.fontSize} onChange={(value) => patchStyle({ fontSize: Math.max(12, value) })} />
+        <label className="field compact">
+          <span>文字颜色</span>
+          <input type="color" value={label.style.color} onChange={(event) => patchStyle({ color: event.target.value })} />
+        </label>
+        <label className="field compact">
+          <span>描边颜色</span>
+          <input type="color" value={label.style.outlineColor} onChange={(event) => patchStyle({ outlineColor: event.target.value })} />
+        </label>
+        <NumberField label="描边宽度" value={label.style.outlineWidth} onChange={(value) => patchStyle({ outlineWidth: Math.max(0, value) })} />
+        <label className="field compact">
+          <span>背景颜色</span>
+          <input type="color" value={label.style.backgroundColor} onChange={(event) => patchStyle({ backgroundColor: event.target.value })} />
+        </label>
+      </div>
+      <label className="toggle-field">
+        <input type="checkbox" checked={label.style.background} onChange={(event) => patchStyle({ background: event.target.checked })} />
+        <span>名称背景</span>
+      </label>
+    </div>
+  )
+}
+
 function VisualKeyframeEditor({
   item,
   fps,
@@ -4843,33 +5089,10 @@ function DialogueInspector({
     <div className="transform-editor">
       <div className="panel-title mini">
         <Captions />
-        <strong>角色对白</strong>
+        <strong>对白字幕</strong>
       </div>
       <label className="field compact">
-        <span>角色名称</span>
-        <input value={item.speakerName || ''} onChange={(event) => onPatch({ speakerName: event.target.value })} />
-      </label>
-      <label className="toggle-field">
-        <input
-          type="checkbox"
-          checked={item.speakerVisible ?? Boolean(item.speakerName)}
-          onChange={(event) => onPatch({ speakerVisible: event.target.checked })}
-        />
-        <span>显示角色名称</span>
-      </label>
-      <label className="field compact">
-        <span>角色名称位置</span>
-        <select
-          value={item.speakerPosition || 'bottom'}
-          onChange={(event) => onPatch({ speakerPosition: event.target.value as TimelineItem['speakerPosition'] })}
-        >
-          <option value="top">上方</option>
-          <option value="middle">中间</option>
-          <option value="bottom">下方</option>
-        </select>
-      </label>
-      <label className="field compact">
-        <span>对白字幕</span>
+        <span>字幕内容</span>
         <textarea value={item.text || ''} onChange={(event) => onPatch({ text: event.target.value })} />
       </label>
       <label className="field compact">
@@ -5094,6 +5317,17 @@ function previewTextLayerStyle(
   }
 }
 
+function previewRoleLabelPositionStyle(position: ProjectFile['subtitleStyle']['position'], bounds: VisibleBounds): CSSProperties {
+  const centerX = (bounds.left + bounds.width / 2) * 100
+  if (position === 'top') {
+    return { left: `${centerX}%`, top: `${bounds.top * 100}%`, transform: 'translate(-50%, calc(-100% - 6px))' }
+  }
+  if (position === 'middle') {
+    return { left: `${centerX}%`, top: `${(bounds.top + bounds.height / 2) * 100}%`, transform: 'translate(-50%, -50%)' }
+  }
+  return { left: `${centerX}%`, top: `${(bounds.top + bounds.height) * 100}%`, transform: 'translate(-50%, 6px)' }
+}
+
 function subtitlePositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
   if (position === 'top') return 30
   if (position === 'middle') return 50
@@ -5191,10 +5425,28 @@ function mediaElementSize(media: HTMLVideoElement | HTMLImageElement): { width: 
 }
 
 function mediaPlaybackSeconds(item: TimelineItem, asset: Asset, localFrame: number, fps: number): number {
-  const sourceFrame = Math.max(0, localFrame + item.sourceInFrame)
+  const sourceFrame = Math.max(0, item.sourceInFrame + localFrame * mediaPlaybackRateForAsset(item, asset))
   const rawSeconds = sourceFrame / fps
   if (!item.loop || !asset.duration || asset.duration <= 0.05) return rawSeconds
   return rawSeconds % asset.duration
+}
+
+function itemPlaybackRate(item: TimelineItem): number {
+  return clampNumber(item.playbackRate ?? 1, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+}
+
+function mediaPlaybackRateForAsset(item: TimelineItem, asset: Asset): number {
+  return ['video', 'gif', 'audio'].includes(asset.type) ? itemPlaybackRate(item) : 1
+}
+
+function isRateStretchItem(item: TimelineItem, assets: Asset[]): boolean {
+  const asset = item.assetId ? assets.find((entry) => entry.id === item.assetId) : null
+  return Boolean(asset && ['video', 'gif', 'audio'].includes(asset.type))
+}
+
+function timelineItemTitle(item: TimelineItem, assets: Asset[]): string {
+  const rate = isRateStretchItem(item, assets) ? ` · 变速 ${itemPlaybackRate(item).toFixed(2)}x` : ''
+  return `${item.label} · 显示时长 ${item.durationFrames} 帧${rate}`
 }
 
 function PanelTitle({ icon, title }: { icon: JSX.Element; title: string }): JSX.Element {
@@ -5272,15 +5524,22 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     speakerPosition: role.speakerPosition || 'bottom',
     subtitlePosition: role.subtitlePosition || 'top'
   }))
-  const timeline = project.timeline.map((item) => {
+  const normalizedTimeline = project.timeline.map((item) => {
     const normalizedItem =
       item.type === 'subtitle'
         ? {
             ...item,
+            playbackRate: 1,
             speakerPosition: item.speakerPosition || 'bottom',
             style: item.style ? normalizeSubtitleStyleConfig({ ...subtitleStyle, ...upgradeLegacySubtitleStyle(item.style) }) : subtitleStyle
           }
-        : item
+        : item.type === 'visual' && item.roleLabel
+          ? {
+              ...item,
+              playbackRate: item.playbackRate === undefined ? 1 : clampNumber(item.playbackRate, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE),
+              roleLabel: mergeRoleLabelPatch({ ...project, tracks, assets: normalizedAssets, roles }, item, item.roleLabel)
+            }
+        : { ...item, playbackRate: item.playbackRate === undefined ? 1 : clampNumber(item.playbackRate, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE) }
     const asset = normalizedItem.assetId ? assetsById.get(normalizedItem.assetId) : undefined
     const track = tracks.find((entry) => entry.id === normalizedItem.trackId)
     if (normalizedItem.type === 'visual' && asset && roleTrackId && trackGroupId(track) === 'background' && isCharacterLikeAsset(asset)) {
@@ -5292,7 +5551,78 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     }
     return normalizedItem
   })
-  return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline }
+  const timeline = migrateLegacyRoleNameSubtitles(normalizedTimeline, tracks, roles, subtitleStyle)
+  return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline, durationSeconds: normalizeProjectDurationSeconds({ ...project, timeline }, 30) }
+}
+
+function migrateLegacyRoleNameSubtitles(
+  timeline: TimelineItem[],
+  tracks: TimelineTrack[],
+  roles: CharacterRole[],
+  subtitleStyle: ProjectFile['subtitleStyle']
+): TimelineItem[] {
+  const roleMap = new Map(roles.map((role) => [role.id, role]))
+  const migrated = timeline.map((item) => ({ ...item }))
+  const removeIds = new Set<string>()
+
+  migrated.forEach((item) => {
+    if (!isRoleNameOnlySubtitle(item) && !(item.type === 'subtitle' && item.speakerName?.trim() && item.speakerVisible !== false)) return
+    const speakerName = item.speakerName?.trim()
+    if (!speakerName) return
+    const visualItem = findLegacyRoleLabelVisualItem(migrated, item, tracks, roles)
+    if (!visualItem) return
+    const role = visualItem.roleId ? roleMap.get(visualItem.roleId) : undefined
+    // Older projects stored role names as subtitle items. When a matching role clip exists,
+    // move only the name onto that visual clip and keep any real subtitle text in place.
+    visualItem.roleLabel = mergeRoleLabelPatch(
+      { version: 1, id: '', title: '', workspaceRoot: '', createdAt: '', updatedAt: '', exportPresetId: '', tracks, timeline: migrated, assets: [], roles, script: '', subtitleStyle, aiRecords: [] },
+      visualItem,
+      {
+        text: speakerName,
+        visible: true,
+        style: normalizeRoleLabelStyle({ ...item.style, position: item.speakerPosition || role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position })
+      }
+    )
+    if (item.text?.trim()) {
+      item.speakerName = undefined
+      item.speakerVisible = undefined
+      item.speakerPosition = undefined
+    } else {
+      removeIds.add(item.id)
+    }
+  })
+
+  return migrated.filter((item) => !removeIds.has(item.id))
+}
+
+function findLegacyRoleLabelVisualItem(
+  timeline: TimelineItem[],
+  subtitle: TimelineItem,
+  tracks: TimelineTrack[],
+  roles: CharacterRole[]
+): TimelineItem | undefined {
+  const speakerName = subtitle.speakerName?.trim() || ''
+  const candidates = timeline.filter(
+    (item) =>
+      item.type === 'visual' &&
+      isRoleVisualItem(item, tracks) &&
+      item.startFrame < subtitle.startFrame + subtitle.durationFrames &&
+      subtitle.startFrame < item.startFrame + item.durationFrames
+  )
+  const sameRole = subtitle.roleId ? candidates.find((item) => item.roleId === subtitle.roleId) : undefined
+  if (sameRole) return sameRole
+
+  const sameTiming = candidates.filter((item) => item.startFrame === subtitle.startFrame && item.durationFrames === subtitle.durationFrames)
+  const matchingRoleName = sameTiming.find((item) => {
+    const role = item.roleId ? roles.find((entry) => entry.id === item.roleId) : undefined
+    return role ? speakerName === roleSpeakerLabel(role) || speakerName === role.name || speakerName.includes(role.name) : false
+  })
+  return matchingRoleName || sameTiming.find((item) => !item.roleLabel?.text?.trim()) || candidates.find((item) => !item.roleLabel?.text?.trim()) || sameTiming[0] || candidates[0]
+}
+
+function isRoleVisualItem(item: TimelineItem, tracks: TimelineTrack[]): boolean {
+  const track = tracks.find((entry) => entry.id === item.trackId)
+  return Boolean(item.roleId || trackGroupId(track) === 'role')
 }
 
 function normalizeProjectTracks(tracks: TimelineTrack[]): TimelineTrack[] {
@@ -5524,10 +5854,15 @@ function createRoleSubtitleItem(role: CharacterRole, line: string, startFrame: n
     sourceInFrame: 0,
     effects: [],
     text: line,
-    speakerName: roleSpeakerLabel(role),
-    speakerVisible: true,
-    speakerPosition: role.speakerPosition,
     style: { position: role.subtitlePosition }
+  }
+}
+
+function createRoleLabel(role: CharacterRole, visible: boolean): NonNullable<TimelineItem['roleLabel']> {
+  return {
+    text: roleSpeakerLabel(role),
+    visible,
+    style: normalizeRoleLabelStyle({ position: role.speakerPosition })
   }
 }
 
@@ -5587,6 +5922,15 @@ function roleAssetScore(role: CharacterRole, asset: Asset): number {
 
 function assetSearchText(asset: Asset): string {
   return `${asset.title || ''} ${asset.filename} ${assetTags(asset).join(' ')}`.toLowerCase()
+}
+
+function assetDisplayName(asset: Asset): string {
+  return asset.title || asset.filename
+}
+
+function isBgmAsset(asset: Asset): boolean {
+  const haystack = `${assetSearchText(asset)} ${(asset.localPath || '').replace(/\\/g, '/').toLowerCase()}`
+  return ['bgm', 'music', 'background music', '配乐', '音乐', '背景音乐', '/music/'].some((token) => haystack.includes(token))
 }
 
 function textToLines(value: string): string[] {
@@ -5741,6 +6085,14 @@ function effectName(effect: string): string {
   return names[effect] || effect
 }
 
+function createNoneEffect(): TimelineItem['effects'][number] {
+  return { ...DEFAULT_EFFECTS[0], id: crypto.randomUUID() }
+}
+
+function defaultEffectsForTrackKind(kind: TrackKind): TimelineItem['effects'] {
+  return kind === 'visual' ? [createNoneEffect()] : []
+}
+
 function trackIdForKind(project: ProjectFile, kind: TrackKind, selectedItem: TimelineItem | null): string {
   if (kind === 'visual') {
     if (selectedItem?.type === 'visual') return selectedItem.trackId
@@ -5753,11 +6105,34 @@ function trackIdForKind(project: ProjectFile, kind: TrackKind, selectedItem: Tim
   return 'visual-main'
 }
 
+function trackIdForAssetDrop(
+  project: ProjectFile,
+  asset: Asset,
+  selectedItem: TimelineItem | null,
+  requestedKind?: TrackKind,
+  activeTool?: EditorToolId
+): string {
+  if (activeTool === 'sticker' && isVisualAsset(asset) && visualTargetGroupForAsset(asset) === 'effect') {
+    return trackByGroupKind(project, 'effect', 'visual')?.id || trackIdForVisualAsset(project, asset, selectedItem)
+  }
+  if (activeTool === 'audio' && canUseAsAudioAsset(asset)) {
+    return trackIdForKind(project, isBgmAsset(asset) ? 'music' : 'sfx', selectedItem)
+  }
+  if (requestedKind) {
+    return requestedKind === 'visual' ? trackIdForVisualAsset(project, asset, selectedItem) : trackIdForKind(project, requestedKind, selectedItem)
+  }
+  if (asset.type === 'audio') {
+    return trackIdForKind(project, isBgmAsset(asset) ? 'music' : 'sfx', selectedItem)
+  }
+  return trackIdForVisualAsset(project, asset, selectedItem)
+}
+
 function trackIdForVisualAsset(project: ProjectFile, asset: Asset, selectedItem: TimelineItem | null): string {
   const bottomTrackId = backgroundTrackId(project)
   if (isBackgroundAsset(asset)) return bottomTrackId
-  if (selectedItem?.type === 'visual' && selectedItem.trackId !== bottomTrackId) return selectedItem.trackId
   const targetGroup = visualTargetGroupForAsset(asset)
+  const selectedTrack = selectedItem?.type === 'visual' ? project.tracks.find((track) => track.id === selectedItem.trackId) : undefined
+  if (selectedTrack?.kind === 'visual' && trackGroupId(selectedTrack) === targetGroup) return selectedTrack.id
   return trackByGroupKind(project, targetGroup, 'visual')?.id || project.tracks.find((track) => track.kind === 'visual' && track.id !== bottomTrackId)?.id || project.tracks.find((track) => track.kind === 'visual')?.id || 'visual-main'
 }
 
@@ -6036,6 +6411,34 @@ function normalizeSubtitleStyleConfig(style?: Partial<ProjectFile['subtitleStyle
   }
 }
 
+function normalizeRoleLabelStyle(style?: Partial<ProjectFile['subtitleStyle']>): ProjectFile['subtitleStyle'] {
+  return normalizeSubtitleStyleConfig({ ...DEFAULT_ROLE_LABEL_STYLE, ...upgradeLegacySubtitleStyle(style) })
+}
+
+function roleLabelForItem(project: ProjectFile | null, item: TimelineItem): { text: string; visible: boolean; style: ProjectFile['subtitleStyle'] } {
+  const role = item.roleId && project ? projectRoles(project).find((entry) => entry.id === item.roleId) : undefined
+  const fallbackText = role ? roleSpeakerLabel(role) : ''
+  const fallbackPosition = role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position
+  return {
+    text: item.roleLabel?.text ?? fallbackText,
+    visible: item.roleLabel?.visible ?? Boolean(item.roleLabel?.text?.trim()),
+    style: normalizeRoleLabelStyle({ position: fallbackPosition, ...item.roleLabel?.style })
+  }
+}
+
+function mergeRoleLabelPatch(
+  project: ProjectFile | null,
+  item: TimelineItem,
+  patch: NonNullable<TimelineItem['roleLabel']>
+): NonNullable<TimelineItem['roleLabel']> {
+  const current = roleLabelForItem(project, item)
+  return {
+    text: patch.text ?? current.text,
+    visible: patch.visible ?? current.visible,
+    style: normalizeRoleLabelStyle({ ...current.style, ...patch.style })
+  }
+}
+
 function previewSubtitleCss(style: ProjectFile['subtitleStyle']): CSSProperties {
   const outline = style.outlineColor
   return {
@@ -6051,6 +6454,25 @@ function previewSubtitleCss(style: ProjectFile['subtitleStyle']): CSSProperties 
       `0 -1px 0 ${outline}`,
       `1px 1px 0 ${outline}`
     ].join(', ')
+  }
+}
+
+function previewRoleLabelCss(style: ProjectFile['subtitleStyle'], transform: NormalizedTransform): CSSProperties {
+  const outline = style.outlineColor
+  return {
+    fontFamily: style.fontFamily,
+    color: style.color,
+    fontSize: `${Math.max(12, Math.round(style.fontSize * 0.34 * transform.scale))}px`,
+    background: style.background ? style.backgroundColor : 'transparent',
+    boxShadow: style.background ? `0 0 0 1px ${style.outlineColor}` : 'none',
+    textShadow: [
+      `1px 0 0 ${outline}`,
+      `-1px 0 0 ${outline}`,
+      `0 1px 0 ${outline}`,
+      `0 -1px 0 ${outline}`,
+      `${Math.max(1, Math.round(style.outlineWidth * 0.5))}px ${Math.max(1, Math.round(style.outlineWidth * 0.5))}px 0 ${outline}`
+    ].join(', '),
+    transform: `scale(${transform.flipX ? -1 : 1}, ${transform.flipY ? -1 : 1})`
   }
 }
 
@@ -6305,6 +6727,19 @@ function canDropAssetOnTimelineTrack(project: ProjectFile, asset: Asset, track: 
   return false
 }
 
+function assetDropBlockedMessage(asset: Asset, track: TimelineTrack): string {
+  if (track.locked) return `${displayTrackName(track)} 已锁定，不能投放素材`
+  if (!canPlaceAssetOnTrack(asset, track.kind)) {
+    if (track.kind === 'subtitle') return '媒体素材不能直接投放到字幕轨'
+    if (track.kind === 'visual') return `${assetDisplayName(asset)} 不是可投放到画面轨的素材`
+    return `${assetDisplayName(asset)} 不是可投放到音频轨的素材`
+  }
+  if (track.kind === 'visual') {
+    return `${assetDisplayName(asset)} 更适合投放到 ${trackGroupLabel(visualTargetGroupForAsset(asset))} 轨`
+  }
+  return `${assetDisplayName(asset)} 不能投放到 ${displayTrackName(track)}`
+}
+
 function displayTrackName(track: TimelineTrack): string {
   const names: Record<string, string> = {
     'visual-main': '背景画面',
@@ -6356,6 +6791,40 @@ function snapThresholdFrames(laneWidth: number, totalFrames: number, fps: number
   return clampNumber(fromPixels, 2, Math.max(2, Math.round(fps * 0.25)))
 }
 
+function buildRateStretchPatch(
+  item: TimelineItem,
+  assets: Asset[],
+  startFrame: number,
+  durationFrames: number,
+  nextStartFrame: number,
+  nextDurationFrames: number,
+  edge: 'start' | 'end'
+): Partial<TimelineItem> {
+  const safeDuration = Math.max(1, Math.round(nextDurationFrames))
+  const fixedEndFrame = startFrame + durationFrames
+  if (!isRateStretchItem(item, assets)) {
+    return edge === 'start'
+      ? { startFrame: Math.max(0, Math.round(nextStartFrame)), durationFrames: Math.max(1, fixedEndFrame - Math.max(0, Math.round(nextStartFrame))) }
+      : { durationFrames: safeDuration }
+  }
+
+  const sourceDurationFrames = Math.max(1, durationFrames * itemPlaybackRate(item))
+  const minDurationFrames = Math.max(1, Math.ceil(sourceDurationFrames / MAX_PLAYBACK_RATE))
+  const maxDurationFrames = Math.max(minDurationFrames, Math.floor(sourceDurationFrames / MIN_PLAYBACK_RATE))
+  const stretchedDurationFrames = clampNumber(safeDuration, minDurationFrames, maxDurationFrames)
+  const playbackRate = clampNumber(sourceDurationFrames / stretchedDurationFrames, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+  const patch: Partial<TimelineItem> = {
+    durationFrames: stretchedDurationFrames,
+    playbackRate: Number(playbackRate.toFixed(3))
+  }
+
+  // Rate stretch keeps the source in-point stable and moves only the dragged edge.
+  if (edge === 'start') {
+    patch.startFrame = Math.max(0, fixedEndFrame - stretchedDurationFrames)
+  }
+  return patch
+}
+
 function snapTimelinePatch({
   project,
   item,
@@ -6363,7 +6832,6 @@ function snapTimelinePatch({
   patch,
   startFrame,
   durationFrames,
-  sourceInFrame,
   trackId,
   playheadFrame,
   rulerFrames,
@@ -6371,11 +6839,10 @@ function snapTimelinePatch({
 }: {
   project: ProjectFile
   item: TimelineItem
-  mode: 'move' | 'trim-start' | 'trim-end'
+  mode: 'move' | 'rate-start' | 'rate-end'
   patch: Partial<TimelineItem>
   startFrame: number
   durationFrames: number
-  sourceInFrame: number
   trackId: string
   playheadFrame: number
   rulerFrames: number[]
@@ -6416,7 +6883,7 @@ function snapTimelinePatch({
     }
   }
 
-  if (mode === 'trim-start') {
+  if (mode === 'rate-start') {
     const nextStart = patch.startFrame ?? startFrame
     const snapStart = nearest(nextStart)
     if (snapStart === null) return patch
@@ -6426,8 +6893,7 @@ function snapTimelinePatch({
     return {
       ...patch,
       startFrame: appliedStart,
-      durationFrames: Math.max(1, durationFrames - delta),
-      sourceInFrame: Math.max(0, sourceInFrame + delta)
+      durationFrames: Math.max(1, durationFrames - delta)
     }
   }
 
@@ -6449,8 +6915,12 @@ function formatSecondsLabel(seconds: number): string {
 
 function canPlaceAssetOnTrack(asset: Asset, kind: TrackKind): boolean {
   if (kind === 'visual') return ['image', 'video', 'gif'].includes(asset.type)
-  if (['voice', 'music', 'sfx'].includes(kind)) return asset.type === 'audio' || (asset.type === 'video' && hasNativeAudioHint(asset))
+  if (['voice', 'music', 'sfx'].includes(kind)) return canUseAsAudioAsset(asset)
   return false
+}
+
+function canUseAsAudioAsset(asset: Asset): boolean {
+  return asset.type === 'audio' || (asset.type === 'video' && hasNativeAudioHint(asset))
 }
 
 function hasNativeAudioHint(asset: Asset): boolean {
@@ -6481,6 +6951,33 @@ function findActiveItem(lookup: TimelineLookup | null, frame: number, type: Trac
       .filter((item) => visibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
       .sort((a, b) => b.startFrame - a.startFrame)[0] || null
   )
+}
+
+function projectContentEndFrame(project: ProjectFile): number {
+  return project.timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0)
+}
+
+function secondsFromFrames(frames: number, fps: number): number {
+  return Math.max(0, Math.round((frames / Math.max(1, fps)) * 1000) / 1000)
+}
+
+function normalizeProjectDurationSeconds(project: ProjectFile, fps: number): number {
+  const contentSeconds = secondsFromFrames(projectContentEndFrame(project), fps)
+  const requestedSeconds = Number(project.durationSeconds)
+  const fallbackSeconds = Math.max(10, contentSeconds)
+  return Math.max(contentSeconds, Number.isFinite(requestedSeconds) && requestedSeconds > 0 ? requestedSeconds : fallbackSeconds)
+}
+
+function projectDurationFrames(project: ProjectFile, fps: number): number {
+  return Math.max(projectContentEndFrame(project), Math.round(normalizeProjectDurationSeconds(project, fps) * fps), fps)
+}
+
+function isRoleNameOnlySubtitle(item: TimelineItem): boolean {
+  return item.type === 'subtitle' && item.speakerVisible !== false && !item.text?.trim() && Boolean(item.speakerName?.trim())
+}
+
+function isTimelineCountItem(item: TimelineItem): boolean {
+  return !isRoleNameOnlySubtitle(item)
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {

@@ -188,6 +188,7 @@ async function createDefaultProject(): Promise<ProjectFile> {
     createdAt: now,
     updatedAt: now,
     exportPresetId: settings?.defaultPresetId || 'douyin-1080p',
+    durationSeconds: 30,
     tracks: defaultTracks(),
     timeline: [],
     assets: await loadAssetIndex(info),

@@ -56,6 +56,17 @@ export const ROLE_COLORS = ['#2563eb', '#f59e0b', '#ec4899', '#10b981', '#7c3aed
 export const STARTER_ROLE_LINES = ['你先别急', '这件事不对劲', '我有一个大胆的想法']
 export const STARTER_ROLE_KEYWORDS = ['绿幕', '猫', '震惊']
 
+export const DEFAULT_ROLE_LABEL_STYLE: ProjectFile['subtitleStyle'] = {
+  fontFamily: 'Microsoft YaHei, Microsoft JhengHei, SimHei, Arial, sans-serif',
+  fontSize: 36,
+  color: '#ffe933',
+  outlineColor: '#111111',
+  outlineWidth: 3,
+  position: 'bottom',
+  background: false,
+  backgroundColor: '#111827'
+}
+
 export const SUBTITLE_STYLE_PRESETS: Array<{ id: string; label: string; style: ProjectFile['subtitleStyle'] }> = [
   {
     id: 'meme-white',
