@@ -47,6 +47,16 @@ interface MediaSize {
 
 const audioProbeCache = new Map<string, boolean>()
 const mediaSizeProbeCache = new Map<string, MediaSize | null>()
+const DEFAULT_ROLE_LABEL_STYLE: ProjectFile['subtitleStyle'] = {
+  fontFamily: 'Microsoft YaHei, Microsoft JhengHei, SimHei, Arial, sans-serif',
+  fontSize: 36,
+  color: '#ffe933',
+  outlineColor: '#111111',
+  outlineWidth: 3,
+  position: 'bottom',
+  background: false,
+  backgroundColor: '#111827'
+}
 
 export async function renderProject(
   info: WorkspaceInfo,
@@ -258,8 +268,12 @@ async function buildFilterComplex(
   })
 
   const subtitleItems = buildSubtitleItems(project)
-  if (subtitleItems.length) {
-    await writeFile(assPath, makeAssFile(project, preset, subtitleItems), 'utf-8')
+  const hasRoleLabels = visualSegments.some((segment) => {
+    const label = roleLabelForItem(segment.item)
+    return label.visible && Boolean(label.text.trim())
+  })
+  if (subtitleItems.length || hasRoleLabels) {
+    await writeFile(assPath, makeAssFile(project, preset, subtitleItems, visualSegments), 'utf-8')
     filters.push(`[${currentVideoLabel}]subtitles='${escapeFilterPath(assPath)}'[vsub]`)
     filters.push('[vsub]format=yuv420p[vout]')
   } else {
@@ -315,7 +329,7 @@ function buildSubtitleItems(project: ProjectFile): TimelineItem[] {
   }))
 }
 
-function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: TimelineItem[]): string {
+function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: TimelineItem[], visualSegments: VisualSegment[]): string {
   const baseStyle = normalizeSubtitleStyle(project.subtitleStyle)
 
   const header = [
@@ -333,7 +347,7 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
   ]
 
-  const events = subtitleItems.flatMap((item) => {
+  const subtitleEvents = subtitleItems.flatMap((item) => {
     const start = framesToAssTime(item.startFrame, preset.fps)
     const end = framesToAssTime(item.startFrame + item.durationFrames, preset.fps)
     const style = normalizeSubtitleStyle({ ...baseStyle, ...item.style })
@@ -354,8 +368,48 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
     }
     return lines
   })
+  const roleLabelEvents = buildRoleLabelAssEvents(visualSegments, preset)
 
-  return [...header, ...events, ''].join('\n')
+  return [...header, ...roleLabelEvents, ...subtitleEvents, ''].join('\n')
+}
+
+function buildRoleLabelAssEvents(visualSegments: VisualSegment[], preset: ExportPreset): string[] {
+  return visualSegments.flatMap((segment) => {
+    const label = roleLabelForItem(segment.item)
+    if (!label.visible || !label.text.trim()) return []
+    return visualRenderChunks(segment.item, preset).map((chunk) => {
+      const startFrame = segment.item.startFrame + chunk.sourceStartFrame
+      const endFrame = startFrame + chunk.durationFrames
+      return `Dialogue: 1,${framesToAssTime(startFrame, preset.fps)},${framesToAssTime(endFrame, preset.fps)},${speakerStyleName(
+        label.style.position
+      )},,0,0,0,,${roleLabelAssOverride(segment, chunk.transform, label.style, preset)}${escapeAssText(label.text.trim())}`
+    })
+  })
+}
+
+function roleLabelAssOverride(
+  segment: VisualSegment,
+  transform: VisualTransform,
+  style: ProjectFile['subtitleStyle'],
+  preset: ExportPreset
+): string {
+  const fitCanvas = !isBackgroundVisualSegment(segment)
+  const width = Math.max(2, Math.round(preset.width * transform.scale))
+  const height = Math.max(2, Math.round(fitCanvas ? width / mediaAspectRatio(segment.asset, segment.mediaSize) : preset.height * transform.scale))
+  const padding = Math.max(6, Math.round(style.fontSize * 0.16))
+  const x = Math.round(preset.width / 2 + transform.x)
+  const baseY = preset.height / 2 + transform.y
+  const y =
+    style.position === 'top'
+      ? Math.round(baseY - height / 2 - padding)
+      : style.position === 'middle'
+        ? Math.round(baseY)
+        : Math.round(baseY + height / 2 + padding)
+  const scale = Math.round(transform.scale * 100)
+  const alpha = Math.round((1 - clamp(transform.opacity, 0, 1)) * 255).toString(16).padStart(2, '0').toUpperCase()
+  return `{\\an5\\pos(${x},${y})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\alpha&H${alpha}&\\fn${assFontName(
+    style.fontFamily
+  )}\\fs${style.fontSize}\\c${assColor(style.color)}\\3c${assColor(style.outlineColor)}\\bord${style.outlineWidth}}`
 }
 
 function assTransformOverride(
@@ -417,6 +471,18 @@ function normalizeSubtitleStyle(style?: Partial<ProjectFile['subtitleStyle']>): 
     position: style?.position || 'top',
     background: style?.background ?? false,
     backgroundColor: /^#[0-9a-f]{6}$/i.test(style?.backgroundColor || '') ? style?.backgroundColor || '#111827' : '#111827'
+  }
+}
+
+function normalizeRoleLabelStyle(style?: Partial<ProjectFile['subtitleStyle']>): ProjectFile['subtitleStyle'] {
+  return normalizeSubtitleStyle({ ...DEFAULT_ROLE_LABEL_STYLE, ...style })
+}
+
+function roleLabelForItem(item: TimelineItem): { text: string; visible: boolean; style: ProjectFile['subtitleStyle'] } {
+  return {
+    text: item.roleLabel?.text || '',
+    visible: item.roleLabel?.visible ?? Boolean(item.roleLabel?.text?.trim()),
+    style: normalizeRoleLabelStyle(item.roleLabel?.style)
   }
 }
 

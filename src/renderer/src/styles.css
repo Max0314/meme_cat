@@ -994,11 +994,17 @@ button:disabled,
 .preview-layer {
   position: absolute;
   transform: translate(-50%, -50%);
-  overflow: hidden;
+  overflow: visible;
   border-radius: 8px;
   cursor: grab;
   outline: 1px solid transparent;
   outline-offset: 2px;
+}
+
+.preview-layer > img,
+.preview-layer > video,
+.preview-layer > canvas {
+  border-radius: inherit;
 }
 
 .preview-layer:active {
@@ -1075,6 +1081,34 @@ button:disabled,
 
 .preview-speaker.speaker-bottom {
   bottom: 4%;
+}
+
+.preview-role-label {
+  position: absolute;
+  z-index: 13;
+  display: flex;
+  justify-content: center;
+  width: max-content;
+  max-width: 150%;
+  min-width: 24px;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.preview-role-label span {
+  display: block;
+  max-width: min(220px, 150%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 850;
+  line-height: 1.18;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.preview-role-label:active {
+  cursor: grabbing;
 }
 
 .preview-empty {

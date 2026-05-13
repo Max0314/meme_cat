@@ -75,6 +75,7 @@ import {
   ASSET_PRIMARY_CATEGORIES,
   ASSET_SORT_OPTIONS,
   ASSET_TYPE_OPTIONS,
+  DEFAULT_ROLE_LABEL_STYLE,
   DEFAULT_EFFECTS,
   ROLE_COLORS,
   STARTER_ROLE_KEYWORDS,
@@ -776,9 +777,6 @@ function App(): JSX.Element {
         sourceInFrame: 0,
         effects: [],
         text: lines[index] || `猫猫镜头 ${index + 1}`,
-        speakerName: index % 2 === 0 ? '猫猫A' : '猫猫B',
-        speakerVisible: true,
-        speakerPosition: 'bottom',
         style: template.subtitleStyle
       })
       cursor += durationFrames
@@ -810,9 +808,6 @@ function App(): JSX.Element {
       sourceInFrame: 0,
       effects: [],
       text,
-      speakerName: index % 2 === 0 ? '猫猫A' : '猫猫B',
-      speakerVisible: true,
-      speakerPosition: 'bottom',
       style: project.subtitleStyle
     }))
     updateProject({
@@ -1202,6 +1197,7 @@ function App(): JSX.Element {
       sourceInFrame: 0,
       effects: [DEFAULT_EFFECTS[1]],
       volume: 1,
+      roleLabel: createRoleLabel(role, true),
       transform: role.defaultTransform,
       keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
     }
@@ -1582,12 +1578,13 @@ function App(): JSX.Element {
   }
 
   function addContextName(item: TimelineItem): void {
+    if (item.type !== 'visual') return
     setContextInput({
       itemId: item.id,
       kind: 'name',
       x: contextMenu?.x || window.innerWidth / 2,
       y: contextMenu?.y || window.innerHeight / 2,
-      value: item.speakerName || item.label || ''
+      value: roleLabelForItem(project, item).text || item.label || ''
     })
   }
 
@@ -1656,7 +1653,12 @@ function App(): JSX.Element {
     const value = contextInput.value.trim()
     if (!value) return
     if (contextInput.kind === 'name') {
-      upsertContextSubtitle(contextInputItem, { speakerName: value, speakerVisible: true })
+      if (contextInputItem.type === 'visual') {
+        moveTimelineItem(contextInputItem.id, {
+          roleLabel: mergeRoleLabelPatch(project, contextInputItem, { text: value, visible: true })
+        })
+        setNotice('已绑定角色名称')
+      }
     } else {
       upsertContextSubtitle(contextInputItem, { text: value, style: project.subtitleStyle })
     }
@@ -2002,7 +2004,7 @@ function App(): JSX.Element {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <button onClick={() => { addContextName(contextMenuItem); setContextMenu(null) }}>
+          <button disabled={contextMenuItem.type !== 'visual'} onClick={() => { addContextName(contextMenuItem); setContextMenu(null) }}>
             <Captions size={14} />
             添加名称
           </button>
@@ -3076,6 +3078,7 @@ function QuickPreview({
         return (
           <QuickPreviewLayer
             key={item.id}
+            project={project}
             item={item}
             asset={asset}
             selected={selectedItemId === item.id}
@@ -3298,6 +3301,7 @@ function QuickPreviewTextLayer({
 }
 
 function QuickPreviewLayer({
+  project,
   item,
   asset,
   selected,
@@ -3313,6 +3317,7 @@ function QuickPreviewLayer({
   onPatchItem,
   onItemContextMenu
 }: {
+  project: ProjectFile
   item: TimelineItem
   asset: Asset
   selected: boolean
@@ -3360,6 +3365,8 @@ function QuickPreviewLayer({
     ...(effectState.filter ? { filter: effectState.filter } : {})
   }
   const canTransform = selected && (activeTool === 'select' || activeTool === 'text') && !locked
+  const roleLabel = roleLabelForItem(project, item)
+  const showRoleLabel = Boolean(roleLabel.visible && roleLabel.text.trim())
 
   useEffect(() => {
     itemRef.current = item
@@ -3532,6 +3539,20 @@ function QuickPreviewLayer({
   return (
     <div className="preview-layer" style={style}>
       {content}
+      {showRoleLabel && (
+        <div
+          className="preview-role-label"
+          style={previewRoleLabelPositionStyle(roleLabel.style.position, visibleBounds)}
+          onPointerDown={beginStageDrag}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onItemContextMenu(item.id, event.clientX, event.clientY)
+          }}
+        >
+          <span style={previewRoleLabelCss(roleLabel.style, effectState.transform)}>{roleLabel.text}</span>
+        </div>
+      )}
       <div
         className={`preview-hitbox ${selected ? 'selected' : ''} ${recentlyPlaced ? 'recently-placed' : ''} ${locked ? 'locked' : ''}`}
         style={visibleBoundsStyle(visibleBounds)}
@@ -3751,6 +3772,7 @@ function PropertyInspector({
       <div className="property-section">
         {selectedItem ? (
           <SelectedInspector
+            project={project}
             item={selectedItem}
             fps={fps}
             playheadFrame={playheadFrame}
@@ -3787,7 +3809,7 @@ function TrackInspector({
 
   const groupId = trackGroupId(track)
   const group = trackGroupDefinition(groupId)
-  const itemCount = project.timeline.filter((item) => item.trackId === track.id).length
+  const itemCount = project.timeline.filter((item) => item.trackId === track.id && isTimelineCountItem(item)).length
   const outputLabel = track.kind === 'visual' || track.kind === 'subtitle' ? '画面输出' : '声音输出'
   const groupOptions = TRACK_GROUPS.filter((option) => canMoveTrackToGroup(track, option.id))
 
@@ -3836,6 +3858,7 @@ function TrackInspector({
 }
 
 function SelectedInspector({
+  project,
   item,
   fps,
   playheadFrame,
@@ -3844,6 +3867,7 @@ function SelectedInspector({
   onSplit,
   onDelete
 }: {
+  project: ProjectFile
   item: TimelineItem | null
   fps: number
   playheadFrame: number
@@ -3908,6 +3932,7 @@ function SelectedInspector({
               ))}
             </select>
           </label>
+          <RoleLabelInspector project={project} item={item} onPatch={onPatch} />
           <VisualKeyframeEditor item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} onSeek={onSeek} />
           <VisualTransformEditor item={item} playheadFrame={playheadFrame} onPatch={onPatch} />
           <VisualKeyingEditor item={item} onPatch={onPatch} />
@@ -3945,7 +3970,7 @@ function ProjectOverviewInspector({
   const projectAssetIds = new Set(project.assets.map((asset) => asset.id))
   const missingCount = [...timelineAssetIds].filter((assetId) => !projectAssetIds.has(String(assetId))).length
   const visualCount = project.timeline.filter((item) => item.type === 'visual').length
-  const subtitleCount = project.timeline.filter((item) => item.type === 'subtitle').length
+  const subtitleCount = project.timeline.filter((item) => item.type === 'subtitle' && isTimelineCountItem(item)).length
   const audioCount = project.timeline.filter((item) => ['voice', 'music', 'sfx'].includes(item.type)).length
   const mutedTracks = project.tracks.filter((track) => track.muted).length
 
@@ -4348,11 +4373,11 @@ function Timeline({
           <button className={activeGroup === 'all' ? 'track-group-tab active' : 'track-group-tab'} onClick={() => onActiveGroupChange('all')}>
             <Layers size={14} />
             全部
-            <span>{project.timeline.length}</span>
+            <span>{project.timeline.filter(isTimelineCountItem).length}</span>
           </button>
           {TRACK_GROUPS.map((group) => {
             const groupTrackIds = new Set(project.tracks.filter((track) => trackGroupId(track) === group.id).map((track) => track.id))
-            const count = project.timeline.filter((item) => groupTrackIds.has(item.trackId)).length
+            const count = project.timeline.filter((item) => groupTrackIds.has(item.trackId) && isTimelineCountItem(item)).length
             return (
               <button
                 key={group.id}
@@ -4395,7 +4420,7 @@ function Timeline({
         {visibleGroups.map((group) => {
           const tracks = project.tracks.filter((track) => trackGroupId(track) === group.id)
           const trackIds = new Set(tracks.map((track) => track.id))
-          const groupItems = project.timeline.filter((item) => trackIds.has(item.trackId))
+          const groupItems = project.timeline.filter((item) => trackIds.has(item.trackId) && isTimelineCountItem(item))
           const allLocked = tracks.length > 0 && tracks.every((track) => track.locked)
           const allMuted = tracks.length > 0 && tracks.every((track) => track.muted)
           return (
@@ -4715,6 +4740,72 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   )
 }
 
+function RoleLabelInspector({
+  project,
+  item,
+  onPatch
+}: {
+  project: ProjectFile
+  item: TimelineItem
+  onPatch: (patch: Partial<TimelineItem>) => void
+}): JSX.Element {
+  const label = roleLabelForItem(project, item)
+  const patchLabel = (patch: NonNullable<TimelineItem['roleLabel']>): void => {
+    onPatch({ roleLabel: mergeRoleLabelPatch(project, item, patch) })
+  }
+  const patchStyle = (patch: Partial<ProjectFile['subtitleStyle']>): void => {
+    patchLabel({ style: { ...label.style, ...patch } })
+  }
+
+  return (
+    <div className="transform-editor role-label-editor">
+      <div className="panel-title mini">
+        <Captions />
+        <strong>角色名称</strong>
+      </div>
+      <label className="field compact">
+        <span>名称</span>
+        <input
+          value={label.text}
+          onChange={(event) => patchLabel({ text: event.target.value, visible: item.roleLabel?.visible ?? true })}
+        />
+      </label>
+      <label className="toggle-field">
+        <input type="checkbox" checked={label.visible} onChange={(event) => patchLabel({ visible: event.target.checked })} />
+        <span>显示名称</span>
+      </label>
+      <div className="number-grid">
+        <label className="field compact">
+          <span>位置</span>
+          <select value={label.style.position} onChange={(event) => patchStyle({ position: event.target.value as ProjectFile['subtitleStyle']['position'] })}>
+            <option value="top">上方</option>
+            <option value="middle">中间</option>
+            <option value="bottom">下方</option>
+          </select>
+        </label>
+        <NumberField label="字号" value={label.style.fontSize} onChange={(value) => patchStyle({ fontSize: Math.max(12, value) })} />
+        <label className="field compact">
+          <span>文字颜色</span>
+          <input type="color" value={label.style.color} onChange={(event) => patchStyle({ color: event.target.value })} />
+        </label>
+        <label className="field compact">
+          <span>描边颜色</span>
+          <input type="color" value={label.style.outlineColor} onChange={(event) => patchStyle({ outlineColor: event.target.value })} />
+        </label>
+        <NumberField label="描边宽度" value={label.style.outlineWidth} onChange={(value) => patchStyle({ outlineWidth: Math.max(0, value) })} />
+        <label className="field compact">
+          <span>背景颜色</span>
+          <input type="color" value={label.style.backgroundColor} onChange={(event) => patchStyle({ backgroundColor: event.target.value })} />
+        </label>
+      </div>
+      <label className="toggle-field">
+        <input type="checkbox" checked={label.style.background} onChange={(event) => patchStyle({ background: event.target.checked })} />
+        <span>名称背景</span>
+      </label>
+    </div>
+  )
+}
+
 function VisualKeyframeEditor({
   item,
   fps,
@@ -4843,33 +4934,10 @@ function DialogueInspector({
     <div className="transform-editor">
       <div className="panel-title mini">
         <Captions />
-        <strong>角色对白</strong>
+        <strong>对白字幕</strong>
       </div>
       <label className="field compact">
-        <span>角色名称</span>
-        <input value={item.speakerName || ''} onChange={(event) => onPatch({ speakerName: event.target.value })} />
-      </label>
-      <label className="toggle-field">
-        <input
-          type="checkbox"
-          checked={item.speakerVisible ?? Boolean(item.speakerName)}
-          onChange={(event) => onPatch({ speakerVisible: event.target.checked })}
-        />
-        <span>显示角色名称</span>
-      </label>
-      <label className="field compact">
-        <span>角色名称位置</span>
-        <select
-          value={item.speakerPosition || 'bottom'}
-          onChange={(event) => onPatch({ speakerPosition: event.target.value as TimelineItem['speakerPosition'] })}
-        >
-          <option value="top">上方</option>
-          <option value="middle">中间</option>
-          <option value="bottom">下方</option>
-        </select>
-      </label>
-      <label className="field compact">
-        <span>对白字幕</span>
+        <span>字幕内容</span>
         <textarea value={item.text || ''} onChange={(event) => onPatch({ text: event.target.value })} />
       </label>
       <label className="field compact">
@@ -5094,6 +5162,17 @@ function previewTextLayerStyle(
   }
 }
 
+function previewRoleLabelPositionStyle(position: ProjectFile['subtitleStyle']['position'], bounds: VisibleBounds): CSSProperties {
+  const centerX = (bounds.left + bounds.width / 2) * 100
+  if (position === 'top') {
+    return { left: `${centerX}%`, top: `${bounds.top * 100}%`, transform: 'translate(-50%, calc(-100% - 6px))' }
+  }
+  if (position === 'middle') {
+    return { left: `${centerX}%`, top: `${(bounds.top + bounds.height / 2) * 100}%`, transform: 'translate(-50%, -50%)' }
+  }
+  return { left: `${centerX}%`, top: `${(bounds.top + bounds.height) * 100}%`, transform: 'translate(-50%, 6px)' }
+}
+
 function subtitlePositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
   if (position === 'top') return 30
   if (position === 'middle') return 50
@@ -5272,7 +5351,7 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     speakerPosition: role.speakerPosition || 'bottom',
     subtitlePosition: role.subtitlePosition || 'top'
   }))
-  const timeline = project.timeline.map((item) => {
+  const normalizedTimeline = project.timeline.map((item) => {
     const normalizedItem =
       item.type === 'subtitle'
         ? {
@@ -5280,6 +5359,11 @@ function normalizeProject(project: ProjectFile): ProjectFile {
             speakerPosition: item.speakerPosition || 'bottom',
             style: item.style ? normalizeSubtitleStyleConfig({ ...subtitleStyle, ...upgradeLegacySubtitleStyle(item.style) }) : subtitleStyle
           }
+        : item.type === 'visual' && item.roleLabel
+          ? {
+              ...item,
+              roleLabel: mergeRoleLabelPatch({ ...project, tracks, assets: normalizedAssets, roles }, item, item.roleLabel)
+            }
         : item
     const asset = normalizedItem.assetId ? assetsById.get(normalizedItem.assetId) : undefined
     const track = tracks.find((entry) => entry.id === normalizedItem.trackId)
@@ -5292,7 +5376,90 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     }
     return normalizedItem
   })
+  const timeline = migrateLegacyRoleNameSubtitles(normalizedTimeline, tracks, roles, subtitleStyle)
   return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline }
+}
+
+function migrateLegacyRoleNameSubtitles(
+  timeline: TimelineItem[],
+  tracks: TimelineTrack[],
+  roles: CharacterRole[],
+  subtitleStyle: ProjectFile['subtitleStyle']
+): TimelineItem[] {
+  const roleMap = new Map(roles.map((role) => [role.id, role]))
+  const migrated = timeline.map((item) => ({ ...item }))
+  const removeIds = new Set<string>()
+  const projectForLabels: ProjectFile = {
+    version: 1,
+    id: '',
+    title: '',
+    workspaceRoot: '',
+    createdAt: '',
+    updatedAt: '',
+    exportPresetId: '',
+    tracks,
+    timeline: migrated,
+    assets: [],
+    roles,
+    script: '',
+    subtitleStyle,
+    aiRecords: []
+  }
+
+  migrated.forEach((item) => {
+    if (!isRoleNameOnlySubtitle(item) && !(item.type === 'subtitle' && item.speakerName?.trim() && item.speakerVisible !== false)) return
+    const speakerName = item.speakerName?.trim()
+    if (!speakerName) return
+    const visualItem = findLegacyRoleLabelVisualItem(migrated, item, tracks, roles)
+    if (!visualItem) return
+    const role = visualItem.roleId ? roleMap.get(visualItem.roleId) : undefined
+    // Older projects stored role names as subtitle items. When a matching role clip exists,
+    // move only the name onto that visual clip and keep any real subtitle text in place.
+    visualItem.roleLabel = mergeRoleLabelPatch(projectForLabels, visualItem, {
+      text: speakerName,
+      visible: true,
+      style: normalizeRoleLabelStyle({ ...item.style, position: item.speakerPosition || role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position })
+    })
+    if (item.text?.trim()) {
+      item.speakerName = undefined
+      item.speakerVisible = undefined
+      item.speakerPosition = undefined
+    } else {
+      removeIds.add(item.id)
+    }
+  })
+
+  return migrated.filter((item) => !removeIds.has(item.id))
+}
+
+function findLegacyRoleLabelVisualItem(
+  timeline: TimelineItem[],
+  subtitle: TimelineItem,
+  tracks: TimelineTrack[],
+  roles: CharacterRole[]
+): TimelineItem | undefined {
+  const speakerName = subtitle.speakerName?.trim() || ''
+  const candidates = timeline.filter(
+    (item) =>
+      item.type === 'visual' &&
+      isRoleVisualItem(item, tracks) &&
+      item.startFrame < subtitle.startFrame + subtitle.durationFrames &&
+      subtitle.startFrame < item.startFrame + item.durationFrames
+  )
+  const sameRole = subtitle.roleId ? candidates.find((item) => item.roleId === subtitle.roleId) : undefined
+  if (sameRole) return sameRole
+
+  const sameTiming = candidates.filter((item) => item.startFrame === subtitle.startFrame && item.durationFrames === subtitle.durationFrames)
+  const matchingRoleName = sameTiming.find((item) => {
+    const role = item.roleId ? roles.find((entry) => entry.id === item.roleId) : undefined
+    return role ? speakerName === roleSpeakerLabel(role) || speakerName === role.name || speakerName.includes(role.name) : false
+  })
+  return matchingRoleName || sameTiming.find((item) => !item.roleLabel?.text?.trim()) || candidates.find((item) => !item.roleLabel?.text?.trim()) || sameTiming[0] || candidates[0]
+}
+
+function isRoleVisualItem(item: TimelineItem, tracks: TimelineTrack[]): boolean {
+  const track = tracks.find((entry) => entry.id === item.trackId)
+  return Boolean(item.roleId || trackGroupId(track) === 'role')
 }
 
 function normalizeProjectTracks(tracks: TimelineTrack[]): TimelineTrack[] {
@@ -5524,10 +5691,15 @@ function createRoleSubtitleItem(role: CharacterRole, line: string, startFrame: n
     sourceInFrame: 0,
     effects: [],
     text: line,
-    speakerName: roleSpeakerLabel(role),
-    speakerVisible: true,
-    speakerPosition: role.speakerPosition,
     style: { position: role.subtitlePosition }
+  }
+}
+
+function createRoleLabel(role: CharacterRole, visible: boolean): NonNullable<TimelineItem['roleLabel']> {
+  return {
+    text: roleSpeakerLabel(role),
+    visible,
+    style: normalizeRoleLabelStyle({ position: role.speakerPosition })
   }
 }
 
@@ -6036,6 +6208,34 @@ function normalizeSubtitleStyleConfig(style?: Partial<ProjectFile['subtitleStyle
   }
 }
 
+function normalizeRoleLabelStyle(style?: Partial<ProjectFile['subtitleStyle']>): ProjectFile['subtitleStyle'] {
+  return normalizeSubtitleStyleConfig({ ...DEFAULT_ROLE_LABEL_STYLE, ...upgradeLegacySubtitleStyle(style) })
+}
+
+function roleLabelForItem(project: ProjectFile | null, item: TimelineItem): { text: string; visible: boolean; style: ProjectFile['subtitleStyle'] } {
+  const role = item.roleId && project ? projectRoles(project).find((entry) => entry.id === item.roleId) : undefined
+  const fallbackText = role ? roleSpeakerLabel(role) : ''
+  const fallbackPosition = role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position
+  return {
+    text: item.roleLabel?.text ?? fallbackText,
+    visible: item.roleLabel?.visible ?? Boolean(item.roleLabel?.text?.trim()),
+    style: normalizeRoleLabelStyle({ position: fallbackPosition, ...item.roleLabel?.style })
+  }
+}
+
+function mergeRoleLabelPatch(
+  project: ProjectFile | null,
+  item: TimelineItem,
+  patch: NonNullable<TimelineItem['roleLabel']>
+): NonNullable<TimelineItem['roleLabel']> {
+  const current = roleLabelForItem(project, item)
+  return {
+    text: patch.text ?? current.text,
+    visible: patch.visible ?? current.visible,
+    style: normalizeRoleLabelStyle({ ...current.style, ...patch.style })
+  }
+}
+
 function previewSubtitleCss(style: ProjectFile['subtitleStyle']): CSSProperties {
   const outline = style.outlineColor
   return {
@@ -6051,6 +6251,25 @@ function previewSubtitleCss(style: ProjectFile['subtitleStyle']): CSSProperties 
       `0 -1px 0 ${outline}`,
       `1px 1px 0 ${outline}`
     ].join(', ')
+  }
+}
+
+function previewRoleLabelCss(style: ProjectFile['subtitleStyle'], transform: NormalizedTransform): CSSProperties {
+  const outline = style.outlineColor
+  return {
+    fontFamily: style.fontFamily,
+    color: style.color,
+    fontSize: `${Math.max(12, Math.round(style.fontSize * 0.34 * transform.scale))}px`,
+    background: style.background ? style.backgroundColor : 'transparent',
+    boxShadow: style.background ? `0 0 0 1px ${style.outlineColor}` : 'none',
+    textShadow: [
+      `1px 0 0 ${outline}`,
+      `-1px 0 0 ${outline}`,
+      `0 1px 0 ${outline}`,
+      `0 -1px 0 ${outline}`,
+      `${Math.max(1, Math.round(style.outlineWidth * 0.5))}px ${Math.max(1, Math.round(style.outlineWidth * 0.5))}px 0 ${outline}`
+    ].join(', '),
+    transform: `scale(${transform.flipX ? -1 : 1}, ${transform.flipY ? -1 : 1})`
   }
 }
 
@@ -6481,6 +6700,14 @@ function findActiveItem(lookup: TimelineLookup | null, frame: number, type: Trac
       .filter((item) => visibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
       .sort((a, b) => b.startFrame - a.startFrame)[0] || null
   )
+}
+
+function isRoleNameOnlySubtitle(item: TimelineItem): boolean {
+  return item.type === 'subtitle' && item.speakerVisible !== false && !item.text?.trim() && Boolean(item.speakerName?.trim())
+}
+
+function isTimelineCountItem(item: TimelineItem): boolean {
+  return !isRoleNameOnlySubtitle(item)
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
