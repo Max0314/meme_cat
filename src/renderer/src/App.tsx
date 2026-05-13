@@ -3349,6 +3349,7 @@ function QuickPreviewLayer({
   const alphaVariant = greenAlphaVariant(asset)
   const mediaSrc = alphaVariant?.fileUrl || asset.fileUrl
   const mediaType = alphaVariant?.format === 'png' ? 'image' : alphaVariant?.format === 'webm' ? 'video' : asset.type
+  const shouldMeasureAlpha = Boolean(alphaVariant)
   const localFrame = localFrameForItem(item, playheadFrame)
   const currentSeconds = mediaPlaybackSeconds(item, asset, localFrame, fps)
   const transform = visualTransformAtFrame(item, localFrame)
@@ -3374,8 +3375,8 @@ function QuickPreviewLayer({
   }, [asset.id, asset.type, asset.width, asset.height])
 
   useEffect(() => {
-    if (!shouldKey) setVisibleBounds({ left: 0, top: 0, width: 1, height: 1 })
-  }, [shouldKey, asset.id])
+    if (!shouldKey && !shouldMeasureAlpha) setVisibleBounds({ left: 0, top: 0, width: 1, height: 1 })
+  }, [shouldKey, shouldMeasureAlpha, asset.id])
 
   const updateVisibleBounds = useCallback((bounds: VisibleBounds) => {
     setVisibleBounds((current) => {
@@ -3521,6 +3522,19 @@ function QuickPreviewLayer({
         onVisibleBounds={updateVisibleBounds}
       />
     )
+  } else if (shouldMeasureAlpha && ['image', 'video', 'gif'].includes(mediaType)) {
+    content = (
+      <AlphaMediaCanvas
+        asset={asset}
+        src={mediaSrc}
+        mediaType={mediaType === 'video' ? 'video' : 'image'}
+        currentSeconds={currentSeconds}
+        isPlaying={isPlaying}
+        measureBounds={selected || !isPlaying}
+        onMediaSize={setMediaSize}
+        onVisibleBounds={updateVisibleBounds}
+      />
+    )
   } else if (mediaType === 'video') {
     content = <video ref={videoRef} src={mediaSrc} muted playsInline preload="auto" onLoadedMetadata={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
   } else if (['image', 'gif'].includes(mediaType)) {
@@ -3619,6 +3633,108 @@ function PreviewAudioElement({
   }, [asset.fileUrl, currentSeconds, isPlaying, item.type, item.volume, playbackRate])
 
   return <audio ref={audioRef} src={asset.fileUrl} preload="auto" />
+}
+
+function AlphaMediaCanvas({
+  asset,
+  src,
+  mediaType,
+  currentSeconds,
+  isPlaying,
+  measureBounds,
+  onMediaSize,
+  onVisibleBounds
+}: {
+  asset: Asset
+  src: string
+  mediaType: 'image' | 'video'
+  currentSeconds: number
+  isPlaying: boolean
+  measureBounds: boolean
+  onMediaSize: (size: { width: number; height: number }) => void
+  onVisibleBounds: (bounds: VisibleBounds) => void
+}): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+  const [canvasSize, setCanvasSize] = useState(() => mediaCanvasSize(asset))
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    const media = mediaType === 'video' ? videoRef.current : imageRef.current
+    if (!canvas || !media || !mediaReady(media)) return
+    const bounds = drawAlphaFrame(canvas, media, measureBounds)
+    if (measureBounds) {
+      onVisibleBounds(
+        bounds && isUsefulForegroundBounds(bounds, { minWidth: 0.006, minHeight: 0.006, minArea: 0.00008 }) ? bounds : { left: 0, top: 0, width: 1, height: 1 }
+      )
+    }
+  }, [mediaType, measureBounds, onVisibleBounds])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || mediaType !== 'video') return
+    if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
+      video.currentTime = Math.max(0, currentSeconds)
+    }
+    if (isPlaying) {
+      void video.play().catch(() => undefined)
+    } else {
+      video.pause()
+    }
+  }, [currentSeconds, isPlaying, mediaType, src])
+
+  useEffect(() => {
+    let frame = 0
+    let stopped = false
+
+    function drawFrame(): void {
+      if (stopped) return
+      draw()
+      if (mediaType === 'video' && isPlaying) {
+        frame = window.requestAnimationFrame(drawFrame)
+      }
+    }
+
+    drawFrame()
+    return () => {
+      stopped = true
+      window.cancelAnimationFrame(frame)
+    }
+  }, [canvasSize.height, canvasSize.width, currentSeconds, draw, isPlaying, mediaType, src])
+
+  return (
+    <>
+      {mediaType === 'video' ? (
+        <video
+          ref={videoRef}
+          src={src}
+          muted
+          playsInline
+          className="key-source"
+          onLoadedMetadata={(event) => {
+            const size = mediaElementSize(event.currentTarget)
+            setCanvasSize(size)
+            onMediaSize(size)
+          }}
+          onSeeked={draw}
+        />
+      ) : (
+        <img
+          ref={imageRef}
+          src={src}
+          alt=""
+          className="key-source"
+          onLoad={(event) => {
+            const size = mediaElementSize(event.currentTarget)
+            setCanvasSize(size)
+            onMediaSize(size)
+          }}
+        />
+      )}
+      <canvas ref={canvasRef} width={canvasSize.width} height={canvasSize.height} className="keyed-canvas" />
+    </>
+  )
 }
 
 function KeyedMediaCanvas({
@@ -6129,8 +6245,63 @@ function drawKeyedFrame(
   }
 }
 
-function isUsefulForegroundBounds(bounds: VisibleBounds): boolean {
-  return bounds.width >= 0.08 && bounds.height >= 0.08 && bounds.width * bounds.height >= 0.012
+function drawAlphaFrame(canvas: HTMLCanvasElement, media: HTMLVideoElement | HTMLImageElement, measureBounds = true): VisibleBounds | null {
+  const context = canvas.getContext('2d', { willReadFrequently: measureBounds })
+  if (!context) return null
+  const sourceWidth = media instanceof HTMLVideoElement ? media.videoWidth : media.naturalWidth
+  const sourceHeight = media instanceof HTMLVideoElement ? media.videoHeight : media.naturalHeight
+  if (!sourceWidth || !sourceHeight) return null
+
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  const scale = Math.max(canvas.width / sourceWidth, canvas.height / sourceHeight)
+  const drawWidth = sourceWidth * scale
+  const drawHeight = sourceHeight * scale
+  const x = (canvas.width - drawWidth) / 2
+  const y = (canvas.height - drawHeight) / 2
+  try {
+    context.drawImage(media, x, y, drawWidth, drawHeight)
+  } catch {
+    return null
+  }
+  if (!measureBounds) return null
+
+  let image: ImageData
+  try {
+    image = context.getImageData(0, 0, canvas.width, canvas.height)
+  } catch {
+    return null
+  }
+  const data = image.data
+  let minX = canvas.width
+  let minY = canvas.height
+  let maxX = -1
+  let maxY = -1
+
+  // Keep the visual layer full-size and only shrink the hitbox, so export coordinates stay aligned with preview.
+  for (let index = 3; index < data.length; index += 4) {
+    if (data[index] <= 12) continue
+    const pixel = (index - 3) / 4
+    const px = pixel % canvas.width
+    const py = Math.floor(pixel / canvas.width)
+    if (px < minX) minX = px
+    if (py < minY) minY = py
+    if (px > maxX) maxX = px
+    if (py > maxY) maxY = py
+  }
+  if (maxX < minX || maxY < minY) return null
+  return {
+    left: minX / canvas.width,
+    top: minY / canvas.height,
+    width: (maxX - minX + 1) / canvas.width,
+    height: (maxY - minY + 1) / canvas.height
+  }
+}
+
+function isUsefulForegroundBounds(
+  bounds: VisibleBounds,
+  minimums: { minWidth: number; minHeight: number; minArea: number } = { minWidth: 0.02, minHeight: 0.02, minArea: 0.0006 }
+): boolean {
+  return bounds.width >= minimums.minWidth && bounds.height >= minimums.minHeight && bounds.width * bounds.height >= minimums.minArea
 }
 
 function detectFirstVisibleFrame(asset: Asset, fps: number, keying?: TimelineItem['keying']): Promise<number> {
@@ -6203,7 +6374,7 @@ function detectFirstVisibleFrame(asset: Asset, fps: number, keying?: TimelineIte
       canvas.width = 128
       canvas.height = Math.max(32, Math.round(128 / clampNumber(aspect, 0.2, 5)))
       const bounds = drawKeyedFrame(canvas, video, normalizedKeying)
-      if (bounds && isUsefulForegroundBounds(bounds)) {
+      if (bounds && isUsefulForegroundBounds(bounds, { minWidth: 0.08, minHeight: 0.08, minArea: 0.012 })) {
         finish(Math.max(0, Math.round(video.currentTime * fps)))
       } else {
         seekNext()
