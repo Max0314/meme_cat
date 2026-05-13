@@ -17,6 +17,12 @@ import type {
   VisualTransform,
   WorkspaceInfo
 } from '../shared/types'
+import {
+  normalizeVisualTransform,
+  primaryVisualEffect,
+  visualAnimationStateAtFrame,
+  visualKeyframes as getVisualKeyframes
+} from '../shared/animation'
 
 interface VisualSegment {
   inputIndex: number
@@ -640,35 +646,30 @@ function projectDurationSeconds(project: ProjectFile, fps: number): number {
 }
 
 function normalizeTransform(transform?: Partial<VisualTransform>): VisualTransform {
-  return {
-    x: transform?.x ?? 0,
-    y: transform?.y ?? 0,
-    scale: clamp(transform?.scale ?? 1, 0.08, 4),
-    rotation: transform?.rotation ?? 0,
-    flipX: transform?.flipX ?? false,
-    flipY: transform?.flipY ?? false,
-    opacity: clamp(transform?.opacity ?? 1, 0, 1)
-  }
+  return normalizeVisualTransform(transform)
 }
 
 function visualRenderChunks(item: TimelineItem, preset: ExportPreset): VisualRenderChunk[] {
-  const keyframes = normalizeVisualKeyframes(item)
+  const keyframes = getVisualKeyframes(item)
   const animatedEffects = hasAnimatedTimelineEffects(item)
   if (!keyframes.length && !animatedEffects) {
-    const effectState = applyTimelineEffects(item, normalizeTransform(item.transform), 0, preset)
+    const animationState = visualAnimationStateAtFrame(item, 0)
+    const effectState = applyTimelineEffects(item, animationState.transform, 0, preset, animationState.effectIntensity)
     return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
   }
 
-  if (keyframes.length === 1 && !animatedEffects) {
-    const effectState = applyTimelineEffects(item, transformFromKeyframe(item, keyframes[0]), 0, preset)
+  if (keyframes.length === 1 && keyframes[0].frame === 0 && !animatedEffects) {
+    const animationState = visualAnimationStateAtFrame(item, 0)
+    const effectState = applyTimelineEffects(item, animationState.transform, 0, preset, animationState.effectIntensity)
     return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
   }
 
   const chunks: VisualRenderChunk[] = []
-  const stepFrames = item.durationFrames > preset.fps * 20 ? Math.max(2, Math.round(preset.fps / 8)) : 2
+  // Animated transforms are emitted frame-by-frame so FFmpeg export matches the live React preview interpolation.
+  const stepFrames = 1
   for (let frame = 0; frame < item.durationFrames; frame += stepFrames) {
-    const baseTransform = visualTransformAtLocalFrame(item, frame, keyframes)
-    const effectState = applyTimelineEffects(item, baseTransform, frame, preset)
+    const animationState = visualAnimationStateAtFrame(item, frame)
+    const effectState = applyTimelineEffects(item, animationState.transform, frame, preset, animationState.effectIntensity)
     chunks.push({
       sourceStartFrame: frame,
       durationFrames: Math.min(stepFrames, item.durationFrames - frame),
@@ -757,15 +758,17 @@ function applyTimelineEffects(
   item: TimelineItem,
   transform: VisualTransform,
   localFrame: number,
-  preset: ExportPreset
+  preset: ExportPreset,
+  effectIntensityOverride?: number
 ): { transform: VisualTransform; filters: string[] } {
   const durationFrames = Math.max(1, item.durationFrames)
   const progress = clamp(localFrame / durationFrames, 0, 1)
   let nextTransform = { ...transform }
   const filters: string[] = []
+  const primaryEffect = primaryVisualEffect(item.effects)
 
   item.effects.forEach((effect) => {
-    const intensity = clamp(effect.intensity, 0, 1)
+    const intensity = clamp(effect.id === primaryEffect?.id && typeof effectIntensityOverride === 'number' ? effectIntensityOverride : effect.intensity, 0, 1)
     if (effect.type === 'zoom-in') {
       nextTransform = { ...nextTransform, scale: clamp(nextTransform.scale * (1 + intensity * progress), 0.08, 4) }
     } else if (effect.type === 'zoom-out') {
