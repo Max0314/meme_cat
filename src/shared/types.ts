@@ -156,6 +156,7 @@ export interface VisualKeyframe {
   scale: number
   rotation: number
   opacity: number
+  effectIntensity?: number
 }
 
 export interface VisualKeying {

@@ -70,6 +70,17 @@ import type {
   WorkspaceInfo
 } from '../../shared/types'
 import {
+  moveVisualKeyframe as moveVisualKeyframeFrame,
+  normalizeVisualTransform,
+  patchVisualAnimationAtFrame,
+  primaryVisualEffect,
+  removeVisualKeyframe as removeSharedVisualKeyframe,
+  upsertVisualKeyframe as upsertSharedVisualKeyframe,
+  visualAnimationStateAtFrame,
+  visualKeyframes as getVisualKeyframes,
+  visualTransformAtFrame as getVisualTransformAtFrame
+} from '../../shared/animation'
+import {
   ASSET_GRID_PAGE_SIZE,
   ASSET_LIST_PAGE_SIZE,
   ASSET_PRIMARY_CATEGORIES,
@@ -165,6 +176,11 @@ const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
 }
 
 type NormalizedTransform = ReturnType<typeof normalizeTransform>
+type ProjectChangeKind = 'project' | 'timeline-item' | 'keyframe' | 'track' | 'role' | 'asset'
+interface ProjectChangeMeta {
+  kind: ProjectChangeKind
+  label: string
+}
 
 const firstVisibleFrameCache = new Map<string, Promise<number>>()
 const greenThumbFrameCache = new Map<string, string>()
@@ -183,6 +199,7 @@ function App(): JSX.Element {
   const [assetSortMode, setAssetSortMode] = useState<AssetSortMode>('recent')
   const [assetViewMode, setAssetViewMode] = useState<AssetViewMode>('grid')
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
+  const [selectedKeyframe, setSelectedKeyframe] = useState<{ itemId: string; keyframeId: string } | null>(null)
   const [placementPulseItemId, setPlacementPulseItemId] = useState<string | null>(null)
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null)
   const [playheadFrame, setPlayheadFrame] = useState(0)
@@ -266,6 +283,18 @@ function App(): JSX.Element {
       null
     )
   }, [project, selectedItem, selectedTrackId])
+
+  useEffect(() => {
+    if (!project || !selectedKeyframe) return
+    const item = project.timeline.find((entry) => entry.id === selectedKeyframe.itemId)
+    if (!item || !visualKeyframes(item).some((keyframe) => keyframe.id === selectedKeyframe.keyframeId)) {
+      setSelectedKeyframe(null)
+    }
+  }, [project, selectedKeyframe])
+
+  useEffect(() => {
+    if (selectedKeyframe && selectedItemId !== selectedKeyframe.itemId) setSelectedKeyframe(null)
+  }, [selectedItemId, selectedKeyframe])
 
   const contextMenuItem = useMemo(
     () => project?.timeline.find((item) => item.id === contextMenu?.itemId) || null,
@@ -1220,20 +1249,39 @@ function App(): JSX.Element {
     setNotice(line ? `已投放 ${role.name} 镜头和台词` : `已投放 ${role.name} 镜头`)
   }
 
-  function updateSelectedItem(patch: Partial<TimelineItem>): void {
+  function selectVisualKeyframe(itemId: string, keyframeId: string, absoluteFrame: number): void {
+    setSelectedItemId(itemId)
+    setSelectedKeyframe({ itemId, keyframeId })
+    setPlayheadFrame(absoluteFrame)
+  }
+
+  function updateSelectedItem(patch: Partial<TimelineItem>, meta?: ProjectChangeMeta): void {
     if (!project || !selectedItem) return
     updateProject({
       ...project,
       timeline: project.timeline.map((item) => (item.id === selectedItem.id ? { ...item, ...patch } : item))
-    })
+    }, meta || { kind: 'timeline-item', label: 'Update selected item' })
   }
 
-  function moveTimelineItem(itemId: string, patch: Partial<TimelineItem>): void {
+  function moveTimelineItem(itemId: string, patch: Partial<TimelineItem>, meta?: ProjectChangeMeta): void {
     if (!project) return
     updateProject({
       ...project,
       timeline: project.timeline.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
-    })
+    }, meta || { kind: 'timeline-item', label: 'Update timeline item' })
+  }
+
+  function moveTimelineItemKeyframe(itemId: string, keyframeId: string, localFrame: number): void {
+    if (!project) return
+    const item = project.timeline.find((entry) => entry.id === itemId)
+    if (!item || item.type !== 'visual') return
+    const moved = moveVisualKeyframe(item, keyframeId, localFrame)
+    updateProject({
+      ...project,
+      timeline: project.timeline.map((entry) => (entry.id === itemId ? { ...entry, keyframes: moved.keyframes } : entry))
+    }, { kind: 'keyframe', label: 'Move keyframe' })
+    setSelectedKeyframe({ itemId, keyframeId })
+    setPlayheadFrame(item.startFrame + moved.frame)
   }
 
   function patchTrack(trackId: string, patch: Partial<TimelineTrack>): void {
@@ -1522,25 +1570,27 @@ function App(): JSX.Element {
     if (action === 'punch-in') {
       const endFrame = clampNumber(localFrame + Math.round(currentPreset.fps * 0.2), 0, Math.max(0, selectedItem.durationFrames - 1))
       const zoomTransform = { ...baseTransform, scale: clampNumber(baseTransform.scale * 1.45, 0.08, 4) }
-      updateSelectedItem({
-        keyframes: mergeVisualActionKeyframes(selectedItem, [
-          { frame: localFrame, transform: baseTransform },
-          { frame: endFrame, transform: zoomTransform }
-        ])
-      })
+      const keyframes = mergeVisualActionKeyframes(selectedItem, [
+        { frame: localFrame, transform: baseTransform },
+        { frame: endFrame, transform: zoomTransform }
+      ])
+      const selectedActionKeyframe = keyframes.find((keyframe) => keyframe.frame === endFrame) || keyframes.find((keyframe) => keyframe.frame === localFrame)
+      updateSelectedItem({ keyframes }, { kind: 'keyframe', label: 'Add punch-in keyframes' })
+      if (selectedActionKeyframe) selectVisualKeyframe(selectedItem.id, selectedActionKeyframe.id, selectedItem.startFrame + selectedActionKeyframe.frame)
       setNotice('已添加突然贴脸关键帧')
       return
     }
     if (action === 'side-hop') {
       const amplitude = Math.round(currentPreset.width * 0.08)
-      updateSelectedItem({
-        keyframes: mergeVisualActionKeyframes(selectedItem, [
-          { frame: localFrame, transform: baseTransform },
-          { frame: localFrame + frameStep, transform: { ...baseTransform, x: baseTransform.x - amplitude } },
-          { frame: localFrame + frameStep * 2, transform: { ...baseTransform, x: baseTransform.x + amplitude } },
-          { frame: localFrame + frameStep * 3, transform: baseTransform }
-        ])
-      })
+      const keyframes = mergeVisualActionKeyframes(selectedItem, [
+        { frame: localFrame, transform: baseTransform },
+        { frame: localFrame + frameStep, transform: { ...baseTransform, x: baseTransform.x - amplitude } },
+        { frame: localFrame + frameStep * 2, transform: { ...baseTransform, x: baseTransform.x + amplitude } },
+        { frame: localFrame + frameStep * 3, transform: baseTransform }
+      ])
+      const selectedActionKeyframe = keyframes.find((keyframe) => keyframe.frame === clampNumber(localFrame + frameStep, 0, Math.max(0, selectedItem.durationFrames - 1)))
+      updateSelectedItem({ keyframes }, { kind: 'keyframe', label: 'Add side-hop keyframes' })
+      if (selectedActionKeyframe) selectVisualKeyframe(selectedItem.id, selectedActionKeyframe.id, selectedItem.startFrame + selectedActionKeyframe.frame)
       setNotice('已添加左右横跳关键帧')
       return
     }
@@ -1693,6 +1743,7 @@ function App(): JSX.Element {
 
   function selectTimelineItem(itemId: string | null): void {
     setSelectedItemId(itemId)
+    setSelectedKeyframe(null)
     const item = itemId ? project?.timeline.find((entry) => entry.id === itemId) : null
     if (item) setSelectedTrackId(item.trackId)
   }
@@ -1708,8 +1759,13 @@ function App(): JSX.Element {
     if (track) selectTrack(track.id)
   }
 
-  function updateProject(nextProject: ProjectFile): void {
+  function commitProjectChange(nextProject: ProjectFile, _meta: ProjectChangeMeta): void {
+    // Undo/redo integration can hook here later; every editor mutation now crosses one project-change boundary.
     setProject({ ...nextProject, tracks: normalizeProjectTracks(nextProject.tracks), updatedAt: new Date().toISOString() })
+  }
+
+  function updateProject(nextProject: ProjectFile, meta: ProjectChangeMeta = { kind: 'project', label: 'Update project' }): void {
+    commitProjectChange(nextProject, meta)
   }
 
   function addAssetsToProject(assets: Asset[]): void {
@@ -1925,11 +1981,14 @@ function App(): JSX.Element {
             totalFrames={totalFrames}
             fps={currentPreset.fps}
             selectedItemId={selectedItemId}
+            selectedKeyframe={selectedKeyframe}
             playheadFrame={playheadFrame}
             activeGroup={activeTrackGroup}
             soloGroup={soloTrackGroup}
             selectedTrackId={selectedTrack?.id || null}
             onSelect={selectTimelineItem}
+            onSelectKeyframe={selectVisualKeyframe}
+            onMoveKeyframe={moveTimelineItemKeyframe}
             onSelectTrack={selectTrack}
             onSeek={setPlayheadFrame}
             onPatchItem={moveTimelineItem}
@@ -1965,10 +2024,12 @@ function App(): JSX.Element {
             fps={currentPreset.fps}
             selectedTrack={selectedTrack}
             selectedItem={selectedItem}
+            selectedKeyframe={selectedKeyframe}
             playheadFrame={playheadFrame}
             lastExport={lastExport}
             onPatchTrack={patchTrack}
             onPatchItem={updateSelectedItem}
+            onSelectKeyframe={selectVisualKeyframe}
             onSeek={setPlayheadFrame}
             onSplit={splitSelectedItem}
             onDelete={deleteSelectedItem}
@@ -3351,8 +3412,9 @@ function QuickPreviewLayer({
   const mediaType = alphaVariant?.format === 'png' ? 'image' : alphaVariant?.format === 'webm' ? 'video' : asset.type
   const localFrame = localFrameForItem(item, playheadFrame)
   const currentSeconds = mediaPlaybackSeconds(item, asset, localFrame, fps)
-  const transform = visualTransformAtFrame(item, localFrame)
-  const effectState = applyTimelineEffects(item, transform, localFrame, fps, presetWidth, presetHeight)
+  const animationState = visualAnimationStateAtFrame(item, localFrame)
+  const transform = animationState.transform
+  const effectState = applyTimelineEffects(item, transform, localFrame, fps, presetWidth, presetHeight, animationState.effectIntensity)
   const keying = normalizeKeying(item.keying)
   const shouldKey = keying.enabled && !alphaVariant
   const style = {
@@ -3723,10 +3785,12 @@ function PropertyInspector({
   fps,
   selectedTrack,
   selectedItem,
+  selectedKeyframe,
   playheadFrame,
   lastExport,
   onPatchTrack,
   onPatchItem,
+  onSelectKeyframe,
   onSeek,
   onSplit,
   onDelete
@@ -3737,10 +3801,12 @@ function PropertyInspector({
   fps: number
   selectedTrack: TimelineTrack | null
   selectedItem: TimelineItem | null
+  selectedKeyframe: { itemId: string; keyframeId: string } | null
   playheadFrame: number
   lastExport: RenderResult | null
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
   onPatchItem: (patch: Partial<TimelineItem>) => void
+  onSelectKeyframe: (itemId: string, keyframeId: string, absoluteFrame: number) => void
   onSeek: (frame: number) => void
   onSplit: () => void
   onDelete: () => void
@@ -3754,7 +3820,9 @@ function PropertyInspector({
             item={selectedItem}
             fps={fps}
             playheadFrame={playheadFrame}
+            selectedKeyframeId={selectedKeyframe?.itemId === selectedItem.id ? selectedKeyframe.keyframeId : null}
             onPatch={onPatchItem}
+            onSelectKeyframe={(keyframeId, frame) => onSelectKeyframe(selectedItem.id, keyframeId, selectedItem.startFrame + frame)}
             onSeek={onSeek}
             onSplit={onSplit}
             onDelete={onDelete}
@@ -3839,7 +3907,9 @@ function SelectedInspector({
   item,
   fps,
   playheadFrame,
+  selectedKeyframeId,
   onPatch,
+  onSelectKeyframe,
   onSeek,
   onSplit,
   onDelete
@@ -3847,7 +3917,9 @@ function SelectedInspector({
   item: TimelineItem | null
   fps: number
   playheadFrame: number
+  selectedKeyframeId: string | null
   onPatch: (patch: Partial<TimelineItem>) => void
+  onSelectKeyframe: (keyframeId: string, frame: number) => void
   onSeek: (frame: number) => void
   onSplit: () => void
   onDelete: () => void
@@ -3908,7 +3980,15 @@ function SelectedInspector({
               ))}
             </select>
           </label>
-          <VisualKeyframeEditor item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} onSeek={onSeek} />
+          <VisualKeyframeEditor
+            item={item}
+            fps={fps}
+            playheadFrame={playheadFrame}
+            selectedKeyframeId={selectedKeyframeId}
+            onPatch={onPatch}
+            onSelectKeyframe={onSelectKeyframe}
+            onSeek={onSeek}
+          />
           <VisualTransformEditor item={item} playheadFrame={playheadFrame} onPatch={onPatch} />
           <VisualKeyingEditor item={item} onPatch={onPatch} />
         </>
@@ -3988,11 +4068,14 @@ function Timeline({
   totalFrames,
   fps,
   selectedItemId,
+  selectedKeyframe,
   selectedTrackId,
   playheadFrame,
   activeGroup,
   soloGroup,
   onSelect,
+  onSelectKeyframe,
+  onMoveKeyframe,
   onSelectTrack,
   onSeek,
   onPatchItem,
@@ -4020,11 +4103,14 @@ function Timeline({
   totalFrames: number
   fps: number
   selectedItemId: string | null
+  selectedKeyframe: { itemId: string; keyframeId: string } | null
   selectedTrackId: string | null
   playheadFrame: number
   activeGroup: TrackGroupFilter
   soloGroup: TrackGroupId | null
   onSelect: (id: string) => void
+  onSelectKeyframe: (itemId: string, keyframeId: string, absoluteFrame: number) => void
+  onMoveKeyframe: (itemId: string, keyframeId: string, localFrame: number) => void
   onSelectTrack: (trackId: string, clearItem?: boolean) => void
   onSeek: (frame: number) => void
   onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
@@ -4056,6 +4142,13 @@ function Timeline({
     sourceInFrame: number
     laneWidth: number
   } | null>(null)
+  const [keyframeDrag, setKeyframeDrag] = useState<{
+    item: TimelineItem
+    keyframeId: string
+    startX: number
+    startFrame: number
+    laneWidth: number
+  } | null>(null)
   const [durationDrag, setDurationDrag] = useState<{ startX: number; startFrames: number; laneWidth: number } | null>(null)
   const [trackDropTarget, setTrackDropTarget] = useState<string | null>(null)
   const [assetDropPreview, setAssetDropPreview] = useState<{
@@ -4067,6 +4160,7 @@ function Timeline({
   } | null>(null)
   const projectRef = useRef(project)
   const patchItemRef = useRef(onPatchItem)
+  const moveKeyframeRef = useRef(onMoveKeyframe)
   const rulerTicks = useMemo(() => makeRulerTicks(totalFrames, fps), [fps, totalFrames])
   const visibleGroups = activeGroup === 'all' ? TRACK_GROUPS : TRACK_GROUPS.filter((group) => group.id === activeGroup)
 
@@ -4077,6 +4171,10 @@ function Timeline({
   useEffect(() => {
     patchItemRef.current = onPatchItem
   }, [onPatchItem])
+
+  useEffect(() => {
+    moveKeyframeRef.current = onMoveKeyframe
+  }, [onMoveKeyframe])
 
   useEffect(() => {
     if (!dragState) return
@@ -4159,6 +4257,48 @@ function Timeline({
       window.removeEventListener('pointerup', onPointerUp)
     }
   }, [dragState, fps, playheadFrame, rulerTicks, snapEnabled, totalFrames])
+
+  useEffect(() => {
+    if (!keyframeDrag) return
+    const activeDrag = keyframeDrag
+    let animationFrame: number | null = null
+    let pendingFrame: number | null = null
+
+    function flushMove(): void {
+      animationFrame = null
+      const frame = pendingFrame
+      pendingFrame = null
+      if (frame !== null) moveKeyframeRef.current(activeDrag.item.id, activeDrag.keyframeId, frame)
+    }
+
+    function scheduleMove(frame: number): void {
+      pendingFrame = frame
+      if (animationFrame === null) {
+        animationFrame = window.requestAnimationFrame(flushMove)
+      }
+    }
+
+    function onPointerMove(event: globalThis.PointerEvent): void {
+      const deltaFrames = Math.round(((event.clientX - activeDrag.startX) / Math.max(1, activeDrag.laneWidth)) * totalFrames)
+      scheduleMove(clampNumber(activeDrag.startFrame + deltaFrames, 0, Math.max(0, activeDrag.item.durationFrames - 1)))
+    }
+
+    function onPointerUp(): void {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+        flushMove()
+      }
+      setKeyframeDrag(null)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp, { once: true })
+    return () => {
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+  }, [keyframeDrag, totalFrames])
 
   useEffect(() => {
     if (!durationDrag) return
@@ -4311,6 +4451,22 @@ function Timeline({
       laneWidth: lane?.getBoundingClientRect().width || 960
     })
     onSelect(item.id)
+  }
+
+  function beginKeyframeDrag(event: PointerEvent<HTMLElement>, item: TimelineItem, keyframe: VisualKeyframe): void {
+    event.preventDefault()
+    event.stopPropagation()
+    const track = project.tracks.find((track) => track.id === item.trackId)
+    if (track?.locked) return
+    const lane = event.currentTarget.closest<HTMLElement>('.track-lane')
+    onSelectKeyframe(item.id, keyframe.id, item.startFrame + keyframe.frame)
+    setKeyframeDrag({
+      item,
+      keyframeId: keyframe.id,
+      startX: event.clientX,
+      startFrame: keyframe.frame,
+      laneWidth: lane?.getBoundingClientRect().width || 960
+    })
   }
 
   function cutItemFromPointer(event: PointerEvent<HTMLElement>, item: TimelineItem): void {
@@ -4521,6 +4677,19 @@ function Timeline({
                         >
                           <span className="resize-handle left" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'trim-start'))} />
                           <span>{item.label}</span>
+                          {item.type === 'visual' && visualKeyframes(item).length > 0 && (
+                            <span className="timeline-keyframe-track" aria-hidden="true">
+                              {visualKeyframes(item).map((keyframe) => (
+                                <span
+                                  key={keyframe.id}
+                                  className={`timeline-keyframe-marker ${selectedKeyframe?.itemId === item.id && selectedKeyframe.keyframeId === keyframe.id ? 'selected' : ''}`}
+                                  style={{ left: `${(keyframe.frame / Math.max(1, item.durationFrames)) * 100}%` }}
+                                  title={`Keyframe ${keyframe.frame}`}
+                                  onPointerDown={(event) => beginKeyframeDrag(event, item, keyframe)}
+                                />
+                              ))}
+                            </span>
+                          )}
                           <span className="resize-handle right" onPointerDown={(event) => (razorMode ? cutItemFromPointer(event, item) : beginDrag(event, item, 'trim-end'))} />
                         </button>
                       ))}
@@ -4719,13 +4888,17 @@ function VisualKeyframeEditor({
   item,
   fps,
   playheadFrame,
+  selectedKeyframeId,
   onPatch,
+  onSelectKeyframe,
   onSeek
 }: {
   item: TimelineItem
   fps: number
   playheadFrame: number
+  selectedKeyframeId: string | null
   onPatch: (patch: Partial<TimelineItem>) => void
+  onSelectKeyframe: (keyframeId: string, frame: number) => void
   onSeek: (frame: number) => void
 }): JSX.Element {
   const localFrame = localFrameForItem(item, playheadFrame)
@@ -4733,7 +4906,33 @@ function VisualKeyframeEditor({
   const currentKeyframe = keyframes.find((keyframe) => keyframe.frame === localFrame)
   const previous = [...keyframes].reverse().find((keyframe) => keyframe.frame < localFrame)
   const next = keyframes.find((keyframe) => keyframe.frame > localFrame)
-  const transform = visualTransformAtFrame(item, localFrame)
+  const state = visualAnimationStateAtFrame(item, localFrame)
+  const transform = state.transform
+  const primaryEffect = primaryVisualEffect(item.effects)
+
+  function patchCurrentFrame(patch: Partial<VisualTransform> & { effectIntensity?: number }): void {
+    onPatch(patchVisualTransformAtFrame(item, localFrame, patch))
+  }
+
+  function addOrUpdateKeyframe(): void {
+    const keyframes = upsertVisualKeyframe(item, localFrame, state)
+    const keyframe = keyframes.find((entry) => entry.frame === localFrame)
+    onPatch({ keyframes })
+    if (keyframe) onSelectKeyframe(keyframe.id, keyframe.frame)
+  }
+
+  function seekKeyframe(keyframe?: VisualKeyframe): void {
+    if (!keyframe) return
+    onSelectKeyframe(keyframe.id, keyframe.frame)
+    onSeek(item.startFrame + keyframe.frame)
+  }
+
+  function moveCurrentKeyframe(frame: number): void {
+    if (!currentKeyframe) return
+    const moved = moveVisualKeyframe(item, currentKeyframe.id, frame)
+    onPatch({ keyframes: moved.keyframes })
+    onSelectKeyframe(currentKeyframe.id, moved.frame)
+  }
 
   return (
     <div className="transform-editor keyframe-editor">
@@ -4745,14 +4944,63 @@ function VisualKeyframeEditor({
         <span>当前 {formatTime(item.startFrame + localFrame, fps)}</span>
         <strong>{currentKeyframe ? '已有关键帧' : `${keyframes.length} 个关键帧`}</strong>
       </div>
+      <div className="keyframe-current-grid">
+        <Metric label="X" value={String(Math.round(transform.x))} />
+        <Metric label="Y" value={String(Math.round(transform.y))} />
+        <Metric label="Scale" value={transform.scale.toFixed(2)} />
+        <Metric label="Rot" value={String(Math.round(transform.rotation))} />
+        <Metric label="Opacity" value={transform.opacity.toFixed(2)} />
+        <Metric label="FX" value={typeof state.effectIntensity === 'number' ? state.effectIntensity.toFixed(2) : '--'} />
+      </div>
+      <div className="keyframe-edit-grid">
+        <NumberField label="X" value={Math.round(transform.x)} onChange={(value) => patchCurrentFrame({ x: value })} />
+        <NumberField label="Y" value={Math.round(transform.y)} onChange={(value) => patchCurrentFrame({ y: value })} />
+        <label className="field compact">
+          <span>Scale</span>
+          <input type="number" min={0.08} max={4} step={0.05} value={transform.scale} onChange={(event) => patchCurrentFrame({ scale: Number(event.target.value) || 1 })} />
+        </label>
+        <NumberField label="Rot" value={Math.round(transform.rotation)} onChange={(value) => patchCurrentFrame({ rotation: value })} />
+        <label className="field compact">
+          <span>Opacity</span>
+          <input type="number" min={0} max={1} step={0.05} value={transform.opacity} onChange={(event) => patchCurrentFrame({ opacity: Number(event.target.value) || 0 })} />
+        </label>
+        <label className="field compact">
+          <span>FX Intensity</span>
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={typeof state.effectIntensity === 'number' ? state.effectIntensity : 0}
+            disabled={!primaryEffect}
+            onChange={(event) => patchCurrentFrame({ effectIntensity: clampNumber(Number(event.target.value) || 0, 0, 1) })}
+          />
+        </label>
+        <NumberField label="Frame" value={localFrame} onChange={moveCurrentKeyframe} />
+      </div>
+      {keyframes.length > 0 && (
+        <div className="keyframe-list">
+          {keyframes.map((keyframe) => (
+            <button
+              type="button"
+              key={keyframe.id}
+              className={selectedKeyframeId === keyframe.id || keyframe.frame === localFrame ? 'keyframe-chip active' : 'keyframe-chip'}
+              onClick={() => seekKeyframe(keyframe)}
+            >
+              <span>{keyframe.frame}</span>
+              <small>{formatTime(item.startFrame + keyframe.frame, fps)}</small>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="keyframe-actions">
-        <button className="command compact" onClick={() => onPatch({ keyframes: upsertVisualKeyframe(item, localFrame, transform) })}>
+        <button className="command compact" onClick={addOrUpdateKeyframe}>
           {currentKeyframe ? '更新' : '添加'}
         </button>
-        <button className="command compact" disabled={!previous} onClick={() => previous && onSeek(item.startFrame + previous.frame)}>
+        <button className="command compact" disabled={!previous} onClick={() => seekKeyframe(previous)}>
           上一帧
         </button>
-        <button className="command compact" disabled={!next} onClick={() => next && onSeek(item.startFrame + next.frame)}>
+        <button className="command compact" disabled={!next} onClick={() => seekKeyframe(next)}>
           下一帧
         </button>
         <button className="command compact danger" disabled={!currentKeyframe} onClick={() => onPatch({ keyframes: removeVisualKeyframe(item, localFrame) })}>
@@ -5112,16 +5360,18 @@ function applyTimelineEffects(
   localFrame: number,
   fps: number,
   presetWidth: number,
-  presetHeight: number
+  presetHeight: number,
+  effectIntensityOverride?: number
 ): { transform: NormalizedTransform; filter?: string } {
   const durationFrames = Math.max(1, item.durationFrames)
   const progress = clampNumber(localFrame / durationFrames, 0, 1)
   let nextTransform = { ...transform }
   let brightness = 1
   let saturation = 1
+  const primaryEffect = primaryVisualEffect(item.effects)
 
   item.effects.forEach((effect) => {
-    const intensity = clampNumber(effect.intensity, 0, 1)
+    const intensity = clampNumber(effect.id === primaryEffect?.id && typeof effectIntensityOverride === 'number' ? effectIntensityOverride : effect.intensity, 0, 1)
     if (effect.type === 'zoom-in') {
       nextTransform = { ...nextTransform, scale: clampNumber(nextTransform.scale * (1 + intensity * progress), 0.08, 4) }
     } else if (effect.type === 'zoom-out') {
@@ -5835,9 +6085,18 @@ function splitVisualKeyframesAtFrame(item: TimelineItem, localFrame: number): { 
   const first = keyframes
     .filter((keyframe) => keyframe.frame < cutFrame)
     .map((keyframe) => ({ ...keyframe, id: keyframe.id || crypto.randomUUID() }))
-  const cutTransform = visualTransformAtFrame(item, cutFrame)
+  const cutState = visualAnimationStateAtFrame(item, cutFrame)
   const second = [
-    { id: crypto.randomUUID(), frame: 0, ...cutTransform },
+    {
+      id: crypto.randomUUID(),
+      frame: 0,
+      x: Math.round(cutState.transform.x),
+      y: Math.round(cutState.transform.y),
+      scale: Number(cutState.transform.scale.toFixed(3)),
+      rotation: Math.round(cutState.transform.rotation),
+      opacity: Number(cutState.transform.opacity.toFixed(3)),
+      ...(typeof cutState.effectIntensity === 'number' ? { effectIntensity: Number(cutState.effectIntensity.toFixed(3)) } : {})
+    },
     ...keyframes
       .filter((keyframe) => keyframe.frame > cutFrame)
       .map((keyframe) => ({ ...keyframe, id: crypto.randomUUID(), frame: keyframe.frame - cutFrame }))
@@ -5849,15 +6108,7 @@ function splitVisualKeyframesAtFrame(item: TimelineItem, localFrame: number): { 
 }
 
 function normalizeTransform(transform?: TimelineItem['transform']): { x: number; y: number; scale: number; rotation: number; flipX: boolean; flipY: boolean; opacity: number } {
-  return {
-    x: transform?.x ?? 0,
-    y: transform?.y ?? 0,
-    scale: Math.max(0.08, Math.min(4, transform?.scale ?? 1)),
-    rotation: transform?.rotation ?? 0,
-    flipX: transform?.flipX ?? false,
-    flipY: transform?.flipY ?? false,
-    opacity: Math.max(0, Math.min(1, transform?.opacity ?? 1))
-  }
+  return normalizeVisualTransform(transform)
 }
 
 function localFrameForItem(item: TimelineItem, playheadFrame: number): number {
@@ -5877,59 +6128,11 @@ function normalizeKeyframe(frame: Partial<VisualKeyframe>, fallback: NormalizedT
 }
 
 function visualKeyframes(item: TimelineItem): VisualKeyframe[] {
-  const base = normalizeTransform(item.transform)
-  const maxFrame = Math.max(0, item.durationFrames - 1)
-  const byFrame = new Map<number, VisualKeyframe>()
-  ;(item.keyframes || []).forEach((keyframe) => {
-    const normalized = normalizeKeyframe(keyframe, base, maxFrame)
-    byFrame.set(normalized.frame, normalized)
-  })
-  return [...byFrame.values()].sort((a, b) => a.frame - b.frame)
+  return getVisualKeyframes(item)
 }
 
 function visualTransformAtFrame(item: TimelineItem, localFrame: number): NormalizedTransform {
-  const base = normalizeTransform(item.transform)
-  const keyframes = visualKeyframes(item)
-  if (!keyframes.length) return base
-
-  const frame = clampNumber(Math.round(localFrame), 0, Math.max(0, item.durationFrames - 1))
-  const first = keyframes[0]
-  if (frame <= first.frame) {
-    if (first.frame > 0) {
-      const ratio = frame / first.frame
-      return {
-        ...base,
-        x: lerp(base.x, first.x, ratio),
-        y: lerp(base.y, first.y, ratio),
-        scale: lerp(base.scale, first.scale, ratio),
-        rotation: lerp(base.rotation, first.rotation, ratio),
-        opacity: lerp(base.opacity, first.opacity, ratio)
-      }
-    }
-    return { ...base, x: first.x, y: first.y, scale: first.scale, rotation: first.rotation, opacity: first.opacity }
-  }
-
-  const last = keyframes[keyframes.length - 1]
-  if (frame >= last.frame) {
-    return { ...base, x: last.x, y: last.y, scale: last.scale, rotation: last.rotation, opacity: last.opacity }
-  }
-
-  for (let index = 0; index < keyframes.length - 1; index += 1) {
-    const from = keyframes[index]
-    const to = keyframes[index + 1]
-    if (frame < from.frame || frame > to.frame) continue
-    const ratio = (frame - from.frame) / Math.max(1, to.frame - from.frame)
-    return {
-      ...base,
-      x: lerp(from.x, to.x, ratio),
-      y: lerp(from.y, to.y, ratio),
-      scale: lerp(from.scale, to.scale, ratio),
-      rotation: lerp(from.rotation, to.rotation, ratio),
-      opacity: lerp(from.opacity, to.opacity, ratio)
-    }
-  }
-
-  return base
+  return getVisualTransformAtFrame(item, localFrame)
 }
 
 function keyframeAtLocalFrame(item: TimelineItem, localFrame: number): VisualKeyframe | undefined {
@@ -5937,69 +6140,30 @@ function keyframeAtLocalFrame(item: TimelineItem, localFrame: number): VisualKey
   return visualKeyframes(item).find((keyframe) => keyframe.frame === frame)
 }
 
-function patchVisualTransformAtFrame(item: TimelineItem, localFrame: number, patch: Partial<VisualTransform>): Partial<TimelineItem> {
-  const frame = clampNumber(Math.round(localFrame), 0, Math.max(0, item.durationFrames - 1))
-  const keyframes = visualKeyframes(item)
-  const existing = keyframes.find((keyframe) => keyframe.frame === frame)
-  const flipPatch =
-    'flipX' in patch || 'flipY' in patch
-      ? { transform: { ...normalizeTransform(item.transform), flipX: patch.flipX ?? normalizeTransform(item.transform).flipX, flipY: patch.flipY ?? normalizeTransform(item.transform).flipY } }
-      : {}
-  if (!existing) {
-    const base = normalizeTransform(item.transform)
-    return { transform: { ...base, ...patch } }
-  }
-  return {
-    ...flipPatch,
-    keyframes: keyframes.map((keyframe) =>
-      keyframe.frame === frame
-        ? normalizeKeyframe({ ...keyframe, ...patch, frame, id: keyframe.id }, normalizeTransform(item.transform), Math.max(0, item.durationFrames - 1))
-        : keyframe
-    )
-  }
+function patchVisualTransformAtFrame(item: TimelineItem, localFrame: number, patch: Partial<VisualTransform> & { effectIntensity?: number }): Partial<TimelineItem> {
+  return patchVisualAnimationAtFrame(item, localFrame, patch)
 }
 
-function upsertVisualKeyframe(item: TimelineItem, localFrame: number, transform = visualTransformAtFrame(item, localFrame)): VisualKeyframe[] {
-  const frame = clampNumber(Math.round(localFrame), 0, Math.max(0, item.durationFrames - 1))
-  const keyframes = visualKeyframes(item).filter((keyframe) => keyframe.frame !== frame)
-  keyframes.push({
-    id: keyframeAtLocalFrame(item, frame)?.id || crypto.randomUUID(),
-    frame,
-    x: Math.round(transform.x),
-    y: Math.round(transform.y),
-    scale: Number(transform.scale.toFixed(3)),
-    rotation: Math.round(transform.rotation),
-    opacity: Number(transform.opacity.toFixed(3))
-  })
-  return keyframes.sort((a, b) => a.frame - b.frame)
+function upsertVisualKeyframe(item: TimelineItem, localFrame: number, state = visualAnimationStateAtFrame(item, localFrame)): VisualKeyframe[] {
+  return upsertSharedVisualKeyframe(item, localFrame, state, () => crypto.randomUUID())
 }
 
 function mergeVisualActionKeyframes(
   item: TimelineItem,
   actionFrames: Array<{ frame: number; transform: NormalizedTransform }>
 ): VisualKeyframe[] {
-  const maxFrame = Math.max(0, item.durationFrames - 1)
-  const byFrame = new Map<number, VisualKeyframe>()
-  visualKeyframes(item).forEach((keyframe) => byFrame.set(keyframe.frame, keyframe))
-  actionFrames.forEach(({ frame, transform }) => {
-    const safeFrame = clampNumber(Math.round(frame), 0, maxFrame)
-    const existing = byFrame.get(safeFrame)
-    byFrame.set(safeFrame, {
-      id: existing?.id || crypto.randomUUID(),
-      frame: safeFrame,
-      x: Math.round(transform.x),
-      y: Math.round(transform.y),
-      scale: Number(transform.scale.toFixed(3)),
-      rotation: Math.round(transform.rotation),
-      opacity: Number(transform.opacity.toFixed(3))
-    })
-  })
-  return [...byFrame.values()].sort((a, b) => a.frame - b.frame)
+  return actionFrames.reduce(
+    (keyframes, actionFrame) => upsertSharedVisualKeyframe({ ...item, keyframes }, actionFrame.frame, { transform: actionFrame.transform, effectIntensity: visualAnimationStateAtFrame(item, actionFrame.frame).effectIntensity }, () => crypto.randomUUID()),
+    visualKeyframes(item)
+  )
 }
 
 function removeVisualKeyframe(item: TimelineItem, localFrame: number): VisualKeyframe[] {
-  const frame = clampNumber(Math.round(localFrame), 0, Math.max(0, item.durationFrames - 1))
-  return visualKeyframes(item).filter((keyframe) => keyframe.frame !== frame)
+  return removeSharedVisualKeyframe(item, localFrame)
+}
+
+function moveVisualKeyframe(item: TimelineItem, keyframeId: string, localFrame: number): { keyframes: VisualKeyframe[]; frame: number } {
+  return moveVisualKeyframeFrame(item, keyframeId, localFrame)
 }
 
 function lerp(from: number, to: number, ratio: number): number {
