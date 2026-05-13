@@ -167,6 +167,26 @@ const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
 
 type NormalizedTransform = ReturnType<typeof normalizeTransform>
 
+const PROJECT_HISTORY_LIMIT = 100
+
+interface ProjectHistoryEntry {
+  before: ProjectFile
+  after: ProjectFile
+  label: string
+  mergeKey?: string
+}
+
+interface ProjectCommitOptions {
+  label?: string
+  mergeKey?: string
+}
+
+interface ProjectReplaceOptions {
+  resetHistory?: boolean
+}
+
+type PatchTimelineItem = (id: string, patch: Partial<TimelineItem>, options?: ProjectCommitOptions) => void
+
 const firstVisibleFrameCache = new Map<string, Promise<number>>()
 const greenThumbFrameCache = new Map<string, string>()
 const MIN_PLAYBACK_RATE = 0.25
@@ -185,6 +205,8 @@ function App(): JSX.Element {
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetSearchRequest['type']>('all')
   const [assetSortMode, setAssetSortMode] = useState<AssetSortMode>('recent')
   const [assetViewMode, setAssetViewMode] = useState<AssetViewMode>('grid')
+  const [undoStack, setUndoStack] = useState<ProjectHistoryEntry[]>([])
+  const [redoStack, setRedoStack] = useState<ProjectHistoryEntry[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const [placementPulseItemId, setPlacementPulseItemId] = useState<string | null>(null)
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null)
@@ -213,11 +235,28 @@ function App(): JSX.Element {
   const [quickSubtitleText, setQuickSubtitleText] = useState('')
   const [quickSubtitleSeconds, setQuickSubtitleSeconds] = useState(2.8)
   const quickSubtitleInputRef = useRef<HTMLInputElement | null>(null)
+  const projectRef = useRef<ProjectFile | null>(null)
+  const undoStackRef = useRef<ProjectHistoryEntry[]>([])
+  const redoStackRef = useRef<ProjectHistoryEntry[]>([])
+  const canUndo = undoStack.length > 0
+  const canRedo = redoStack.length > 0
   const razorMode = activeTool === 'razor'
 
   useEffect(() => {
     void boot()
   }, [])
+
+  useEffect(() => {
+    projectRef.current = project
+  }, [project])
+
+  useEffect(() => {
+    undoStackRef.current = undoStack
+  }, [undoStack])
+
+  useEffect(() => {
+    redoStackRef.current = redoStack
+  }, [redoStack])
 
   useEffect(() => {
     return window.catMeme.onGreenScreenPreprocessProgress((progress) => {
@@ -343,7 +382,7 @@ function App(): JSX.Element {
       setSettings(nextSettings)
       setPresets(nextPresets)
       setTemplates(nextTemplates)
-      setProject(normalizeProject({ ...nextProject, assets: normalizedAssets }))
+      replaceProjectWithoutHistory(normalizeProject({ ...nextProject, assets: normalizedAssets }), { resetHistory: true })
       setLocalAssets(normalizedAssets)
       setNotice(`工作区：${workspaceInfo.root}`)
     } catch (error) {
@@ -423,7 +462,17 @@ function App(): JSX.Element {
       if (event.isComposing) return
       if (isTypingTarget(event.target)) return
 
-      if (event.code === 'Space' && !event.repeat) {
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyZ') {
+        event.preventDefault()
+        if (event.shiftKey) {
+          if (canRedo) redoProject()
+        } else if (canUndo) {
+          undoProject()
+        }
+      } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyY') {
+        event.preventDefault()
+        if (canRedo) redoProject()
+      } else if (event.code === 'Space' && !event.repeat) {
         event.preventDefault()
         setIsPlaying((value) => !value)
       } else if ((event.ctrlKey || event.metaKey) && event.code === 'ArrowLeft') {
@@ -537,7 +586,7 @@ function App(): JSX.Element {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, clipClipboard, isPlaying, playheadFrame, project, selectedItem, totalFrames])
+  }, [activeTool, canRedo, canUndo, clipClipboard, isPlaying, playheadFrame, project, selectedItem, totalFrames])
 
   async function importLocalAssets(): Promise<void> {
     try {
@@ -572,7 +621,9 @@ function App(): JSX.Element {
       })
       const normalizedAssets = normalizeAssets(result.assets)
       setLocalAssets(normalizedAssets)
-      setProject((current) => (current ? { ...current, assets: mergeAssets(current.assets, normalizedAssets), updatedAt: new Date().toISOString() } : current))
+      commitProjectUpdate((current) => ({ ...current, assets: mergeAssets(current.assets, normalizedAssets) }), {
+        label: '更新绿幕缓存'
+      })
       setNotice(`透明缓存完成：成功 ${result.success}，跳过 ${result.skipped}，失败 ${result.failed}`)
     } catch (error) {
       setNotice(errorText(error))
@@ -701,27 +752,33 @@ function App(): JSX.Element {
           : undefined,
       keying: trackKind === 'visual' && isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
     }
-    updateProject({
-      ...project,
-      assets: mergeAssets(project.assets, [asset]),
-      timeline: [...project.timeline, item]
-    })
+    const addAssetMergeKey = `asset-add-${item.id}`
+    updateProject(
+      {
+        ...project,
+        assets: mergeAssets(project.assets, [asset]),
+        timeline: [...project.timeline, item]
+      },
+      { label: '添加素材', mergeKey: addAssetMergeKey }
+    )
     setSelectedItemId(item.id)
     if (trackKind === 'visual') setPlacementPulseItemId(item.id)
     setPlayheadFrame(item.startFrame)
     if (trackKind === 'visual' && isGreenScreenAsset(asset)) {
       void detectFirstVisibleFrame(asset, currentPreset.fps, item.keying).then((sourceInFrame) => {
         if (sourceInFrame <= 0) return
-        setProject((current) => {
-          if (!current || !current.timeline.some((timelineItem) => timelineItem.id === item.id)) return current
-          return {
-            ...current,
-            updatedAt: new Date().toISOString(),
-            timeline: current.timeline.map((timelineItem) =>
-              timelineItem.id === item.id ? { ...timelineItem, sourceInFrame } : timelineItem
-            )
-          }
-        })
+        patchProjectWithoutHistory(
+          (current) => {
+            if (!current.timeline.some((timelineItem) => timelineItem.id === item.id)) return current
+            return {
+              ...current,
+              timeline: current.timeline.map((timelineItem) =>
+                timelineItem.id === item.id ? { ...timelineItem, sourceInFrame } : timelineItem
+              )
+            }
+          },
+          { mergeKey: addAssetMergeKey }
+        )
       })
     }
     return true
@@ -966,7 +1023,7 @@ function App(): JSX.Element {
     try {
       setBusy('保存工程')
       const result = await window.catMeme.saveProject(project)
-      setProject(normalizeProject(result.project))
+      replaceProjectWithoutHistory(normalizeProject(result.project))
       setNotice(`已保存：${result.filePath}`)
     } catch (error) {
       setNotice(errorText(error))
@@ -979,7 +1036,7 @@ function App(): JSX.Element {
     try {
       const result = await window.catMeme.loadProject()
       if (result?.project) {
-        setProject(normalizeProject(result.project))
+        replaceProjectWithoutHistory(normalizeProject(result.project), { resetHistory: true })
         setSelectedItemId(null)
         setPreview(null)
         setNotice(`已打开：${result.filePath}`)
@@ -992,7 +1049,7 @@ function App(): JSX.Element {
   async function newProject(): Promise<void> {
     try {
       const nextProject = await window.catMeme.newProject()
-      setProject(normalizeProject(nextProject))
+      replaceProjectWithoutHistory(normalizeProject(nextProject), { resetHistory: true })
       setSelectedItemId(null)
       setPreview(null)
       setNotice('已创建空工程')
@@ -1225,20 +1282,27 @@ function App(): JSX.Element {
     setNotice(line ? `已投放 ${role.name} 镜头和台词` : `已投放 ${role.name} 镜头`)
   }
 
-  function updateSelectedItem(patch: Partial<TimelineItem>): void {
+  function updateSelectedItem(patch: Partial<TimelineItem>, options: ProjectCommitOptions = {}): void {
     if (!project || !selectedItem) return
-    updateProject({
-      ...project,
-      timeline: project.timeline.map((item) => (item.id === selectedItem.id ? { ...item, ...patch } : item))
-    })
+    const itemId = selectedItem.id
+    commitProjectUpdate(
+      (current) => ({
+        ...current,
+        timeline: current.timeline.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+      }),
+      options
+    )
   }
 
-  function moveTimelineItem(itemId: string, patch: Partial<TimelineItem>): void {
+  function moveTimelineItem(itemId: string, patch: Partial<TimelineItem>, options: ProjectCommitOptions = {}): void {
     if (!project) return
-    updateProject({
-      ...project,
-      timeline: project.timeline.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
-    })
+    commitProjectUpdate(
+      (current) => ({
+        ...current,
+        timeline: current.timeline.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+      }),
+      options
+    )
   }
 
   function patchTrack(trackId: string, patch: Partial<TimelineTrack>): void {
@@ -1719,21 +1783,125 @@ function App(): JSX.Element {
     if (track) selectTrack(track.id)
   }
 
-  function updateProject(nextProject: ProjectFile): void {
-    const fps = currentPreset?.fps || 30
-    setProject({
-      ...nextProject,
-      tracks: normalizeProjectTracks(nextProject.tracks),
-      durationSeconds: normalizeProjectDurationSeconds(nextProject, fps),
-      updatedAt: new Date().toISOString()
-    })
+  function commitProjectChange(nextProject: ProjectFile, options: ProjectCommitOptions = {}): void {
+    const before = projectRef.current
+    if (!before) return
+    const after = prepareProjectForHistory(nextProject, currentPreset?.fps || 30)
+    if (projectHistoryKey(before) === projectHistoryKey(after)) return
+
+    const entry: ProjectHistoryEntry = {
+      before: cloneProjectSnapshot(before),
+      after: cloneProjectSnapshot(after),
+      label: options.label || '编辑工程',
+      mergeKey: options.mergeKey
+    }
+    pushProjectHistory(entry)
+    setRedoHistory([])
+    applyProjectState(after)
+  }
+
+  function commitProjectUpdate(getNextProject: (current: ProjectFile) => ProjectFile, options: ProjectCommitOptions = {}): void {
+    const before = projectRef.current
+    if (!before) return
+    commitProjectChange(getNextProject(before), options)
+  }
+
+  function patchProjectWithoutHistory(getNextProject: (current: ProjectFile) => ProjectFile, options: ProjectCommitOptions = {}): void {
+    const current = projectRef.current
+    if (!current) return
+    const nextProject = prepareProjectForHistory(getNextProject(current), currentPreset?.fps || 30)
+    if (projectHistoryKey(current) === projectHistoryKey(nextProject)) return
+    applyProjectState(nextProject)
+    if (options.mergeKey) updateLatestHistoryAfter(nextProject, options.mergeKey)
+  }
+
+  function replaceProjectWithoutHistory(nextProject: ProjectFile, options: ProjectReplaceOptions = {}): void {
+    applyProjectState(prepareProjectForHistory(nextProject, currentPreset?.fps || 30))
+    if (options.resetHistory) {
+      setUndoHistory([])
+      setRedoHistory([])
+    }
+  }
+
+  function applyProjectState(nextProject: ProjectFile): void {
+    const snapshot = cloneProjectSnapshot(nextProject)
+    projectRef.current = snapshot
+    setProject(snapshot)
+    reconcileProjectSelection(snapshot)
+  }
+
+  function reconcileProjectSelection(nextProject: ProjectFile): void {
+    setSelectedItemId((current) => (current && nextProject.timeline.some((item) => item.id === current) ? current : null))
+    setSelectedTrackId((current) =>
+      current && nextProject.tracks.some((track) => track.id === current) ? current : nextProject.tracks[0]?.id || null
+    )
+  }
+
+  function pushProjectHistory(entry: ProjectHistoryEntry): void {
+    const stack = undoStackRef.current
+    const lastEntry = stack[stack.length - 1]
+    if (entry.mergeKey && lastEntry?.mergeKey === entry.mergeKey) {
+      setUndoHistory([
+        ...stack.slice(0, -1),
+        {
+          ...lastEntry,
+          after: entry.after,
+          label: entry.label || lastEntry.label
+        }
+      ])
+      return
+    }
+    const nextStack = [...stack, entry]
+    setUndoHistory(nextStack.length > PROJECT_HISTORY_LIMIT ? nextStack.slice(nextStack.length - PROJECT_HISTORY_LIMIT) : nextStack)
+  }
+
+  function updateLatestHistoryAfter(nextProject: ProjectFile, mergeKey: string): void {
+    const after = cloneProjectSnapshot(nextProject)
+    const stack = undoStackRef.current
+    const lastEntry = stack[stack.length - 1]
+    if (!lastEntry || lastEntry.mergeKey !== mergeKey) return
+    setUndoHistory([...stack.slice(0, -1), { ...lastEntry, after }])
+  }
+
+  function undoProject(): void {
+    const stack = undoStackRef.current
+    const entry = stack[stack.length - 1]
+    if (!entry) return
+    setUndoHistory(stack.slice(0, -1))
+    setRedoHistory([...redoStackRef.current, entry].slice(-PROJECT_HISTORY_LIMIT))
+    applyProjectState(entry.before)
+    setNotice(`已撤回：${entry.label}`)
+  }
+
+  function redoProject(): void {
+    const stack = redoStackRef.current
+    const entry = stack[stack.length - 1]
+    if (!entry) return
+    setRedoHistory(stack.slice(0, -1))
+    setUndoHistory([...undoStackRef.current, entry].slice(-PROJECT_HISTORY_LIMIT))
+    applyProjectState(entry.after)
+    setNotice(`已重做：${entry.label}`)
+  }
+
+  function setUndoHistory(stack: ProjectHistoryEntry[]): void {
+    undoStackRef.current = stack
+    setUndoStack(stack)
+  }
+
+  function setRedoHistory(stack: ProjectHistoryEntry[]): void {
+    redoStackRef.current = stack
+    setRedoStack(stack)
+  }
+
+  function updateProject(nextProject: ProjectFile, options: ProjectCommitOptions = {}): void {
+    commitProjectChange(nextProject, options)
   }
 
   function setProjectDurationFrames(frames: number): void {
     if (!project || !currentPreset) return
     const minFrames = Math.max(projectContentEndFrame(project), currentPreset.fps)
     const nextFrames = Math.max(minFrames, Math.round(frames))
-    updateProject({ ...project, durationSeconds: secondsFromFrames(nextFrames, currentPreset.fps) })
+    updateProject({ ...project, durationSeconds: secondsFromFrames(nextFrames, currentPreset.fps) }, { label: '调整总时长' })
     setPlayheadFrame((frame) => Math.min(frame, nextFrames))
   }
 
@@ -1743,7 +1911,7 @@ function App(): JSX.Element {
   }
 
   function addAssetsToProject(assets: Asset[]): void {
-    setProject((current) => (current ? { ...current, assets: mergeAssets(current.assets, assets) } : current))
+    commitProjectUpdate((current) => ({ ...current, assets: mergeAssets(current.assets, assets) }), { label: '导入素材' })
   }
 
   if (!project || !settings || !workspace || !currentPreset) {
@@ -1756,7 +1924,7 @@ function App(): JSX.Element {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-can-undo={canUndo} data-can-redo={canRedo}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">CAT</span>
@@ -3066,7 +3234,7 @@ function QuickPreview({
   activeTool: EditorToolId
   onSelect: (id: string) => void
   onClearSelection: () => void
-  onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
+  onPatchItem: PatchTimelineItem
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
   onDropAsset: (assetId: string, clientX: number, clientY: number, stage: HTMLElement) => void
   onCreateSubtitle: () => void
@@ -3081,6 +3249,13 @@ function QuickPreview({
     : selectedSubtitleItem
       ? normalizeTransform(selectedSubtitleItem.transform)
       : null
+  const wheelHistoryRef = useRef<{ itemId: string; localFrame: number; mergeKey: string; timeoutId: number | null } | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (wheelHistoryRef.current?.timeoutId) window.clearTimeout(wheelHistoryRef.current.timeoutId)
+    }
+  }, [])
 
   function handleDrop(event: DragEvent<HTMLDivElement>): void {
     event.preventDefault()
@@ -3112,7 +3287,26 @@ function QuickPreview({
         const localFrame = localFrameForItem(wheelTarget, playheadFrame)
         const transform = visualTransformAtFrame(wheelTarget, localFrame)
         const factor = event.deltaY < 0 ? 1.08 : 0.92
-        onPatchItem(wheelTarget.id, patchVisualTransformAtFrame(wheelTarget, localFrame, { scale: clampNumber(transform.scale * factor, 0.08, 4) }))
+        let wheelHistory = wheelHistoryRef.current
+        if (!wheelHistory || wheelHistory.itemId !== wheelTarget.id || wheelHistory.localFrame !== localFrame) {
+          wheelHistory = {
+            itemId: wheelTarget.id,
+            localFrame,
+            mergeKey: `preview-wheel-${wheelTarget.id}-${crypto.randomUUID()}`,
+            timeoutId: null
+          }
+          wheelHistoryRef.current = wheelHistory
+        }
+        if (wheelHistory.timeoutId) window.clearTimeout(wheelHistory.timeoutId)
+        // Wheel events arrive as a burst, so keep one history step until the burst settles.
+        wheelHistory.timeoutId = window.setTimeout(() => {
+          if (wheelHistoryRef.current?.mergeKey === wheelHistory?.mergeKey) wheelHistoryRef.current = null
+        }, 420)
+        onPatchItem(
+          wheelTarget.id,
+          patchVisualTransformAtFrame(wheelTarget, localFrame, { scale: clampNumber(transform.scale * factor, 0.08, 4) }),
+          { label: '缩放素材', mergeKey: wheelHistory.mergeKey }
+        )
         onSelect(wheelTarget.id)
       }}
     >
@@ -3186,7 +3380,7 @@ function QuickPreviewTextLayer({
   presetWidth: number
   presetHeight: number
   onSelect: (id: string) => void
-  onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
+  onPatchItem: PatchTimelineItem
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
 }): JSX.Element {
   const itemRef = useRef(item)
@@ -3202,6 +3396,7 @@ function QuickPreviewTextLayer({
     centerY: number
     startDistance: number
     startAngle: number
+    mergeKey: string
   } | null>(null)
   const transform = normalizeTransform(item.transform)
   const subtitleStyle = normalizeSubtitleStyle(project.subtitleStyle, item.style)
@@ -3227,7 +3422,12 @@ function QuickPreviewTextLayer({
       animationFrame = null
       const patch = pendingPatch
       pendingPatch = null
-      if (patch) patchItemRef.current(itemRef.current.id, patch)
+      if (patch) {
+        patchItemRef.current(itemRef.current.id, patch, {
+          label: activeDrag.mode === 'move' ? '移动字幕' : activeDrag.mode === 'rotate' ? '旋转字幕' : '缩放字幕',
+          mergeKey: activeDrag.mergeKey
+        })
+      }
     }
 
     function schedulePatch(patch: Partial<TimelineItem>): void {
@@ -3294,7 +3494,8 @@ function QuickPreviewTextLayer({
       centerX,
       centerY,
       startDistance: Math.hypot(event.clientX - centerX, event.clientY - centerY),
-      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI
+      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI,
+      mergeKey: `preview-text-${item.id}-${mode}-${crypto.randomUUID()}`
     })
   }
 
@@ -3386,7 +3587,7 @@ function QuickPreviewLayer({
   activeTool: EditorToolId
   locked: boolean
   onSelect: (id: string) => void
-  onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
+  onPatchItem: PatchTimelineItem
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
 }): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -3404,6 +3605,7 @@ function QuickPreviewLayer({
     centerY: number
     startDistance: number
     startAngle: number
+    mergeKey: string
   } | null>(null)
   const [mediaSize, setMediaSize] = useState(() => mediaCanvasSize(asset))
   const [visibleBounds, setVisibleBounds] = useState<VisibleBounds>({ left: 0, top: 0, width: 1, height: 1 })
@@ -3461,7 +3663,12 @@ function QuickPreviewLayer({
       animationFrame = null
       const patch = pendingPatch
       pendingPatch = null
-      if (patch) patchItemRef.current(itemRef.current.id, patch)
+      if (patch) {
+        patchItemRef.current(itemRef.current.id, patch, {
+          label: activeDrag.mode === 'move' ? '移动素材' : activeDrag.mode === 'rotate' ? '旋转素材' : '缩放素材',
+          mergeKey: activeDrag.mergeKey
+        })
+      }
     }
 
     function schedulePatch(patch: Partial<TimelineItem>): void {
@@ -3527,7 +3734,8 @@ function QuickPreviewLayer({
       centerX: 0,
       centerY: 0,
       startDistance: 0,
-      startAngle: 0
+      startAngle: 0,
+      mergeKey: `preview-visual-${item.id}-move-${crypto.randomUUID()}`
     })
   }
 
@@ -3553,7 +3761,8 @@ function QuickPreviewLayer({
       centerX,
       centerY,
       startDistance: Math.hypot(event.clientX - centerX, event.clientY - centerY),
-      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI
+      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI,
+      mergeKey: `preview-visual-${item.id}-${mode}-${crypto.randomUUID()}`
     })
   }
 
@@ -4143,7 +4352,7 @@ function Timeline({
   onSelect: (id: string) => void
   onSelectTrack: (trackId: string, clearItem?: boolean) => void
   onSeek: (frame: number) => void
-  onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
+  onPatchItem: PatchTimelineItem
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
   onPatchGroup: (groupId: TrackGroupId, patch: Partial<TimelineTrack>) => void
   onAddTrack: (groupId?: TrackGroupId, kind?: TrackKind) => void
@@ -4172,6 +4381,7 @@ function Timeline({
     durationFrames: number
     sourceInFrame: number
     laneWidth: number
+    mergeKey: string
   } | null>(null)
   const [durationDrag, setDurationDrag] = useState<{ startX: number; startFrames: number; laneWidth: number } | null>(null)
   const [trackDropTarget, setTrackDropTarget] = useState<string | null>(null)
@@ -4205,7 +4415,12 @@ function Timeline({
       animationFrame = null
       const patch = pendingPatch
       pendingPatch = null
-      if (patch) patchItemRef.current(activeDrag.item.id, patch)
+      if (patch) {
+        patchItemRef.current(activeDrag.item.id, patch, {
+          label: activeDrag.mode === 'move' ? '移动片段' : '裁剪片段',
+          mergeKey: activeDrag.mergeKey
+        })
+      }
     }
 
     function schedulePatch(patch: Partial<TimelineItem>): void {
@@ -4476,7 +4691,8 @@ function Timeline({
       startFrame: item.startFrame,
       durationFrames: item.durationFrames,
       sourceInFrame: item.sourceInFrame,
-      laneWidth: lane?.getBoundingClientRect().width || 960
+      laneWidth: lane?.getBoundingClientRect().width || 960,
+      mergeKey: `timeline-${item.id}-${mode}-${crypto.randomUUID()}`
     })
     onSelect(item.id)
   }
@@ -5641,6 +5857,23 @@ function normalizeProjectTracks(tracks: TimelineTrack[]): TimelineTrack[] {
   return tracks
     .map((track) => ({ ...track, groupId: trackGroupId(track), locked: Boolean(track.locked), muted: Boolean(track.muted) }))
     .sort((a, b) => trackGroupOrder(trackGroupId(a)) - trackGroupOrder(trackGroupId(b)))
+}
+
+function prepareProjectForHistory(project: ProjectFile, fps = 30): ProjectFile {
+  return {
+    ...project,
+    tracks: normalizeProjectTracks(project.tracks),
+    durationSeconds: normalizeProjectDurationSeconds(project, fps),
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function cloneProjectSnapshot(project: ProjectFile): ProjectFile {
+  return structuredClone(project)
+}
+
+function projectHistoryKey(project: ProjectFile): string {
+  return JSON.stringify({ ...project, updatedAt: '' })
 }
 
 function trackGroupId(track?: Pick<TimelineTrack, 'id' | 'name' | 'kind' | 'groupId'> | null): TrackGroupId {
