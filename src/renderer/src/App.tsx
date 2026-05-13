@@ -5564,6 +5564,22 @@ function migrateLegacyRoleNameSubtitles(
   const roleMap = new Map(roles.map((role) => [role.id, role]))
   const migrated = timeline.map((item) => ({ ...item }))
   const removeIds = new Set<string>()
+  const projectForLabels: ProjectFile = {
+    version: 1,
+    id: '',
+    title: '',
+    workspaceRoot: '',
+    createdAt: '',
+    updatedAt: '',
+    exportPresetId: '',
+    tracks,
+    timeline: migrated,
+    assets: [],
+    roles,
+    script: '',
+    subtitleStyle,
+    aiRecords: []
+  }
 
   migrated.forEach((item) => {
     if (!isRoleNameOnlySubtitle(item) && !(item.type === 'subtitle' && item.speakerName?.trim() && item.speakerVisible !== false)) return
@@ -5574,15 +5590,11 @@ function migrateLegacyRoleNameSubtitles(
     const role = visualItem.roleId ? roleMap.get(visualItem.roleId) : undefined
     // Older projects stored role names as subtitle items. When a matching role clip exists,
     // move only the name onto that visual clip and keep any real subtitle text in place.
-    visualItem.roleLabel = mergeRoleLabelPatch(
-      { version: 1, id: '', title: '', workspaceRoot: '', createdAt: '', updatedAt: '', exportPresetId: '', tracks, timeline: migrated, assets: [], roles, script: '', subtitleStyle, aiRecords: [] },
-      visualItem,
-      {
-        text: speakerName,
-        visible: true,
-        style: normalizeRoleLabelStyle({ ...item.style, position: item.speakerPosition || role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position })
-      }
-    )
+    visualItem.roleLabel = mergeRoleLabelPatch(projectForLabels, visualItem, {
+      text: speakerName,
+      visible: true,
+      style: normalizeRoleLabelStyle({ ...item.style, position: item.speakerPosition || role?.speakerPosition || DEFAULT_ROLE_LABEL_STYLE.position })
+    })
     if (item.text?.trim()) {
       item.speakerName = undefined
       item.speakerVisible = undefined

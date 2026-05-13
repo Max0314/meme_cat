@@ -284,7 +284,10 @@ async function buildFilterComplex(
   })
 
   const subtitleItems = buildSubtitleItems(project, preset.fps)
-  const hasRoleLabels = visualSegments.some((segment) => roleLabelForItem(segment.item).visible && roleLabelForItem(segment.item).text.trim())
+  const hasRoleLabels = visualSegments.some((segment) => {
+    const label = roleLabelForItem(segment.item)
+    return label.visible && Boolean(label.text.trim())
+  })
   if (subtitleItems.length || hasRoleLabels) {
     await writeFile(assPath, makeAssFile(project, preset, subtitleItems, visualSegments), 'utf-8')
     filters.push(`[${currentVideoLabel}]subtitles='${escapeFilterPath(assPath)}'[vsub]`)
@@ -426,7 +429,8 @@ function roleLabelAssOverride(
         ? Math.round(baseY)
         : Math.round(baseY + height / 2 + padding)
   const scale = Math.round(transform.scale * 100)
-  return `{\\an5\\pos(${x},${y})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\fn${assFontName(
+  const alpha = Math.round((1 - clamp(transform.opacity, 0, 1)) * 255).toString(16).padStart(2, '0').toUpperCase()
+  return `{\\an5\\pos(${x},${y})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\alpha&H${alpha}&\\fn${assFontName(
     style.fontFamily
   )}\\fs${style.fontSize}\\c${assColor(style.color)}\\3c${assColor(style.outlineColor)}\\bord${style.outlineWidth}}`
 }
