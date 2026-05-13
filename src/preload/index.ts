@@ -14,6 +14,7 @@ import type {
   GreenScreenPreprocessRequest,
   GreenScreenPreprocessResult,
   ProjectFile,
+  RenderProgress,
   RenderRequest,
   RenderResult,
   WorkspaceInfo
@@ -42,6 +43,11 @@ const api = {
   tts: (request: AiTtsRequest): Promise<Asset> => ipcRenderer.invoke('ai.tts', request),
   renderPreview: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.preview', request),
   renderExport: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.export', request),
+  onRenderProgress: (callback: (progress: RenderProgress) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, progress: RenderProgress): void => callback(progress)
+    ipcRenderer.on('render.progress', listener)
+    return () => ipcRenderer.removeListener('render.progress', listener)
+  },
   selectExportDir: (defaultPath?: string): Promise<string | null> => ipcRenderer.invoke('dialog.selectExportDir', defaultPath),
   selectExportPath: (defaultPath?: string): Promise<string | null> => ipcRenderer.invoke('dialog.selectExportPath', defaultPath),
   listTemplates: (): Promise<CatMemeTemplate[]> => ipcRenderer.invoke('templates.list'),

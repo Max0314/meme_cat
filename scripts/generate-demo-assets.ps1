@@ -12,6 +12,19 @@ $sfxDir = Join-Path $Root "assets\sfx"
 $dataDir = Join-Path $Root "data"
 New-Item -ItemType Directory -Force -Path $catsDir, $musicDir, $sfxDir, $dataDir | Out-Null
 
+function Merge-AssetIndexById([string]$IndexPath, [object[]]$Assets) {
+  $tempPath = [IO.Path]::GetTempFileName()
+  try {
+    @($Assets) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+    & node (Join-Path $PSScriptRoot "merge-asset-index.mjs") $IndexPath $tempPath "replace-ids"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to merge asset index."
+    }
+  } finally {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Color-Hex([string]$hex) {
   return [System.Drawing.ColorTranslator]::FromHtml($hex)
 }
@@ -315,16 +328,7 @@ $assets += [ordered]@{
 }
 
 $indexPath = Join-Path $dataDir "assets.index.json"
-$existing = @()
-if (Test-Path -LiteralPath $indexPath) {
-  $raw = Get-Content -LiteralPath $indexPath -Raw
-  if ($raw.Trim()) {
-    $existing = @($raw | ConvertFrom-Json)
-  }
-}
-$demoIds = @($assets | ForEach-Object { $_.id })
-$kept = @($existing | Where-Object { $demoIds -notcontains $_.id })
-@($assets + $kept) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $indexPath -Encoding UTF8
+Merge-AssetIndexById -IndexPath $indexPath -Assets $assets
 
 Write-Host "Generated demo assets:"
 $assets | ForEach-Object { Write-Host " - $($_.localPath)" }

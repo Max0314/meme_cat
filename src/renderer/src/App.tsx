@@ -1,8 +1,12 @@
 import {
+  AudioLines,
   Captions,
+  Crosshair,
   FastForward,
   FilePlus2,
   Film,
+  FlipHorizontal,
+  FlipVertical,
   Folder,
   FolderOpen,
   GripVertical,
@@ -15,11 +19,14 @@ import {
   Magnet,
   Loader2,
   Mic2,
+  MousePointer2,
+  Move,
   Music2,
   Pause,
   Play,
   Plus,
   Repeat2,
+  RotateCcw,
   Rewind,
   Rocket,
   Save,
@@ -30,10 +37,13 @@ import {
   Sparkles,
   StepBack,
   StepForward,
+  Sticker,
   Trash2,
+  Type,
   Unlock,
   Volume2,
   VolumeX,
+  WandSparkles,
   Upload
 } from 'lucide-react'
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -49,8 +59,8 @@ import type {
   CharacterRole,
   ExportPreset,
   ProjectFile,
+  RenderProgress,
   RenderResult,
-  TimelineEffect,
   TimelineItem,
   TimelineTrack,
   TrackGroupId,
@@ -59,61 +69,41 @@ import type {
   VisualTransform,
   WorkspaceInfo
 } from '../../shared/types'
-
-type AssetPrimaryCategory = 'all' | 'background' | 'character' | 'green-screen' | 'audio' | 'props' | 'sticker'
-type AssetSortMode = 'recent' | 'name' | 'duration' | 'type' | 'usage'
-type AssetViewMode = 'grid' | 'list'
-type TrackGroupFilter = TrackGroupId | 'all'
-
-interface TrackGroupDefinition {
-  id: TrackGroupId
-  label: string
-  shortLabel: string
-  output: 'visual' | 'audio' | 'subtitle'
-}
-
-const TRACK_GROUPS: TrackGroupDefinition[] = [
-  { id: 'background', label: '背景', shortLabel: 'BG', output: 'visual' },
-  { id: 'role', label: '角色', shortLabel: 'V', output: 'visual' },
-  { id: 'effect', label: '贴纸/特效', shortLabel: 'FX', output: 'visual' },
-  { id: 'subtitle', label: '字幕', shortLabel: 'T', output: 'subtitle' },
-  { id: 'bgm', label: 'BGM', shortLabel: 'M', output: 'audio' },
-  { id: 'sfx', label: '音效', shortLabel: 'A', output: 'audio' }
-]
-
-const TRACK_GROUP_ORDER = TRACK_GROUPS.map((group) => group.id)
-const TRACK_DRAG_MIME = 'application/x-cat-meme-track'
-
-interface AssetCategory {
-  id: AssetPrimaryCategory
-  label: string
-  description: string
-}
-
-interface AssetSubcategory {
-  id: string
-  label: string
-  tokens: string[]
-  exactTags?: string[]
-}
-
-interface LocalAssetFilter {
-  query: string
-  primaryCategory: AssetPrimaryCategory
-  subCategory: string
-  typeFilter: AssetSearchRequest['type']
-  sortMode: AssetSortMode
-}
-
-const ASSET_PRIMARY_CATEGORIES: AssetCategory[] = [
-  { id: 'all', label: '全部', description: '所有图片、视频、GIF、音频' },
-  { id: 'background', label: '背景素材', description: '场景、游戏、房间、舞台' },
-  { id: 'character', label: '角色 meme', description: '香蕉猫、哭猫、震惊、生气' },
-  { id: 'green-screen', label: '绿幕', description: '已抠像或可抠像素材' },
-  { id: 'audio', label: '音频素材', description: 'BGM、音效、配音、有声视频' },
-  { id: 'props', label: '特效/道具', description: '攻击、闪白、表情、道具' },
-  { id: 'sticker', label: '字幕/贴纸', description: '贴纸、标题、弹幕风素材' }
-]
+import {
+  ASSET_GRID_PAGE_SIZE,
+  ASSET_LIST_PAGE_SIZE,
+  ASSET_PRIMARY_CATEGORIES,
+  ASSET_SORT_OPTIONS,
+  ASSET_TYPE_OPTIONS,
+  DEFAULT_EFFECTS,
+  ROLE_COLORS,
+  STARTER_ROLE_KEYWORDS,
+  STARTER_ROLE_LINES,
+  SUBTITLE_STYLE_PRESETS,
+  TRACK_DRAG_MIME,
+  TRACK_GROUP_ORDER,
+  TRACK_GROUPS
+} from './constants'
+import type {
+  AssetPrimaryCategory,
+  AssetSortMode,
+  AssetSubcategory,
+  AssetViewMode,
+  ContextInputDialog,
+  EditorToolId,
+  LocalAssetFilter,
+  MemeActionId,
+  RightTab,
+  SubtitleStyleScope,
+  SubtitleSyncMode,
+  SubtitleTimingMode,
+  TimelineContextMenu,
+  TimelineLookup,
+  TransformHandleId,
+  TrackGroupDefinition,
+  TrackGroupFilter,
+  VisibleBounds
+} from './types'
 
 const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
   all: [{ id: 'all', label: '全部', tokens: [] }],
@@ -174,81 +164,10 @@ const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
   ]
 }
 
-const ASSET_TYPE_OPTIONS: Array<{ id: AssetSearchRequest['type']; label: string }> = [
-  { id: 'all', label: '全部类型' },
-  { id: 'image', label: '图片' },
-  { id: 'video', label: '视频' },
-  { id: 'gif', label: 'GIF' },
-  { id: 'audio', label: '音频' }
-]
-
-const ASSET_SORT_OPTIONS: Array<{ id: AssetSortMode; label: string }> = [
-  { id: 'recent', label: '最近导入' },
-  { id: 'name', label: '名称' },
-  { id: 'duration', label: '时长' },
-  { id: 'type', label: '类型' },
-  { id: 'usage', label: '常用优先' }
-]
-const ASSET_GRID_PAGE_SIZE = 36
-const ASSET_LIST_PAGE_SIZE = 24
-const DEFAULT_EFFECTS: TimelineEffect[] = [
-  { id: 'effect-none', type: 'none', intensity: 0 },
-  { id: 'effect-zoom-in', type: 'zoom-in', intensity: 0.25 },
-  { id: 'effect-zoom-out', type: 'zoom-out', intensity: 0.2 },
-  { id: 'effect-pan-left', type: 'pan-left', intensity: 0.18 },
-  { id: 'effect-pan-right', type: 'pan-right', intensity: 0.18 },
-  { id: 'effect-shake', type: 'shake', intensity: 0.32 },
-  { id: 'effect-flash', type: 'flash', intensity: 0.24 }
-]
-const ROLE_COLORS = ['#2563eb', '#f59e0b', '#ec4899', '#10b981', '#7c3aed', '#ef4444']
-const STARTER_ROLE_LINES = ['你先别急', '这件事不对劲', '我有一个大胆的想法']
-const STARTER_ROLE_KEYWORDS = ['绿幕', '猫', '震惊']
-const SUBTITLE_STYLE_PRESETS: Array<{ id: string; label: string; style: ProjectFile['subtitleStyle'] }> = [
-  {
-    id: 'meme-white',
-    label: 'B站白字黑边',
-    style: { fontFamily: 'Microsoft YaHei, Microsoft JhengHei, SimHei, Arial, sans-serif', fontSize: 56, color: '#ffffff', outlineColor: '#000000', outlineWidth: 3, position: 'top', background: false, backgroundColor: '#111827' }
-  },
-  {
-    id: 'narration-bar',
-    label: '旁白底条',
-    style: { fontFamily: 'Microsoft YaHei', fontSize: 48, color: '#ffffff', outlineColor: '#111827', outlineWidth: 2, position: 'bottom', background: true, backgroundColor: '#111827' }
-  },
-  {
-    id: 'shock-title',
-    label: '震惊大字',
-    style: { fontFamily: 'Microsoft YaHei', fontSize: 72, color: '#fef08a', outlineColor: '#7f1d1d', outlineWidth: 6, position: 'middle', background: false, backgroundColor: '#450a0a' }
-  }
-]
-
-type RightTab = 'templates' | 'roles' | 'script' | 'export' | 'settings'
-type SubtitleSyncMode = 'replace' | 'from-playhead' | 'append'
-type SubtitleTimingMode = 'auto' | 'fixed' | 'even'
-type SubtitleStyleScope = 'all' | 'selected' | 'future'
 type NormalizedTransform = ReturnType<typeof normalizeTransform>
 
-interface VisibleBounds {
-  left: number
-  top: number
-  width: number
-  height: number
-}
-
-interface TimelineContextMenu {
-  itemId: string
-  x: number
-  y: number
-}
-
-interface ContextInputDialog {
-  itemId: string
-  kind: 'name' | 'subtitle'
-  x: number
-  y: number
-  value: string
-}
-
 const firstVisibleFrameCache = new Map<string, Promise<number>>()
+const greenThumbFrameCache = new Map<string, string>()
 
 function App(): JSX.Element {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
@@ -264,13 +183,14 @@ function App(): JSX.Element {
   const [assetSortMode, setAssetSortMode] = useState<AssetSortMode>('recent')
   const [assetViewMode, setAssetViewMode] = useState<AssetViewMode>('grid')
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
+  const [placementPulseItemId, setPlacementPulseItemId] = useState<string | null>(null)
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null)
   const [playheadFrame, setPlayheadFrame] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [playerSpeed, setPlayerSpeed] = useState(1)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelineSnapEnabled, setTimelineSnapEnabled] = useState(true)
-  const [razorMode, setRazorMode] = useState(false)
+  const [activeTool, setActiveTool] = useState<EditorToolId>('select')
   const [activeTrackGroup, setActiveTrackGroup] = useState<TrackGroupFilter>('all')
   const [soloTrackGroup, setSoloTrackGroup] = useState<TrackGroupId | null>(null)
   const [toolDrawer, setToolDrawer] = useState<'export' | 'settings' | null>(null)
@@ -284,11 +204,14 @@ function App(): JSX.Element {
   const [preview, setPreview] = useState<RenderResult | null>(null)
   const [lastExport, setLastExport] = useState<RenderResult | null>(null)
   const [preprocessProgress, setPreprocessProgress] = useState<GreenScreenPreprocessProgress | null>(null)
+  const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null)
   const [busy, setBusy] = useState<string | null>('启动中')
   const [notice, setNotice] = useState('正在初始化应用...')
   const [aiTopic, setAiTopic] = useState('猫猫上班第一天就想离职')
   const [quickSubtitleText, setQuickSubtitleText] = useState('')
   const [quickSubtitleSeconds, setQuickSubtitleSeconds] = useState(2.8)
+  const quickSubtitleInputRef = useRef<HTMLInputElement | null>(null)
+  const razorMode = activeTool === 'razor'
 
   useEffect(() => {
     void boot()
@@ -300,6 +223,22 @@ function App(): JSX.Element {
       setNotice(`透明缓存：${progress.current}/${progress.total}，成功 ${progress.success}，跳过 ${progress.skipped}，失败 ${progress.failed}`)
     })
   }, [])
+
+  useEffect(() => {
+    return window.catMeme.onRenderProgress((progress) => {
+      setRenderProgress(progress)
+      const percent = Math.round(progress.percent * 100)
+      setNotice(`${progress.mode === 'preview' ? '预览' : '导出'}：${progress.message} ${percent}%`)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!placementPulseItemId) return
+    const timeout = window.setTimeout(() => {
+      setPlacementPulseItemId((current) => (current === placementPulseItemId ? null : current))
+    }, 760)
+    return () => window.clearTimeout(timeout)
+  }, [placementPulseItemId])
 
   const currentPreset = useMemo(() => {
     if (!project) return presets[0]
@@ -338,28 +277,28 @@ function App(): JSX.Element {
     [contextInput, project]
   )
 
+  const timelineLookup = useMemo(() => (project ? createTimelineLookup(project) : null), [project])
+
   const previewTrackGroup = useMemo<TrackGroupId | null>(
     () => soloTrackGroup || (activeTrackGroup === 'all' ? null : activeTrackGroup),
     [activeTrackGroup, soloTrackGroup]
   )
 
   const activeVisualItems = useMemo(
-    () => findActiveVisualItems(project, playheadFrame, previewTrackGroup),
-    [project, playheadFrame, previewTrackGroup]
+    () => findActiveVisualItems(timelineLookup, playheadFrame, previewTrackGroup),
+    [playheadFrame, previewTrackGroup, timelineLookup]
   )
 
   const activeSubtitleItem = useMemo(
     () => {
-      const item = findActiveItem(project, playheadFrame, 'subtitle')
-      if (!item || !previewTrackGroup) return item
-      return trackGroupId(project?.tracks.find((track) => track.id === item.trackId)) === previewTrackGroup ? item : null
+      return findActiveItem(timelineLookup, playheadFrame, 'subtitle', previewTrackGroup)
     },
-    [project, playheadFrame, previewTrackGroup]
+    [playheadFrame, previewTrackGroup, timelineLookup]
   )
 
   const activeAudioItems = useMemo(
-    () => findPreviewAudioItems(project, playheadFrame, previewTrackGroup),
-    [project, playheadFrame, previewTrackGroup]
+    () => findPreviewAudioItems(timelineLookup, playheadFrame, previewTrackGroup),
+    [playheadFrame, previewTrackGroup, timelineLookup]
   )
 
   const filteredLocalAssets = useMemo(
@@ -476,6 +415,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
+      if (event.isComposing) return
       if (isTypingTarget(event.target)) return
 
       if (event.code === 'Space' && !event.repeat) {
@@ -521,8 +461,7 @@ function App(): JSX.Element {
         setPlayerSpeed((speed) => (isPlaying ? Math.min(4, speed * 2) : Math.max(1, speed)))
       } else if (event.code === 'KeyC' && !event.ctrlKey && !event.metaKey) {
         event.preventDefault()
-        setRazorMode(true)
-        setNotice('剃刀工具：点击片段即可切开，按 V 返回选择')
+        activateEditorTool('razor')
       } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyC') {
         event.preventDefault()
         copySelectedItem()
@@ -553,16 +492,27 @@ function App(): JSX.Element {
       } else if ((event.ctrlKey || event.metaKey) && (event.code === 'Minus' || event.code === 'NumpadSubtract')) {
         event.preventDefault()
         setTimelineZoom((zoom) => clampNumber(zoom / 1.15, 1, 4))
+      } else if (event.code === 'KeyT' && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        activateEditorTool('text')
+      } else if (event.code === 'KeyP' && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        activateEditorTool('sticker')
+      } else if (event.code === 'KeyA' && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        activateEditorTool('audio')
+      } else if (event.code === 'KeyE' && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        activateEditorTool('animate')
       } else if (event.code === 'KeyH') {
         event.preventDefault()
         patchSelectedVisualTransform((transform) => ({ flipX: !transform.flipX }))
-      } else if (event.code === 'KeyV') {
+      } else if (event.code === 'KeyV' && !event.ctrlKey && !event.metaKey) {
         event.preventDefault()
-        if (razorMode) {
-          setRazorMode(false)
-          setNotice('已切回选择工具')
-        } else {
+        if (event.shiftKey) {
           patchSelectedVisualTransform((transform) => ({ flipY: !transform.flipY }))
+        } else {
+          activateEditorTool('select')
         }
       } else if (event.code === 'KeyR') {
         event.preventDefault()
@@ -575,13 +525,14 @@ function App(): JSX.Element {
         muteSelectedItem()
       } else if (event.code === 'Escape') {
         event.preventDefault()
+        if (activeTool !== 'select') activateEditorTool('select')
         setSelectedItemId(null)
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [clipClipboard, isPlaying, playheadFrame, project, razorMode, selectedItem, totalFrames])
+  }, [activeTool, clipClipboard, isPlaying, playheadFrame, project, selectedItem, totalFrames])
 
   async function importLocalAssets(): Promise<void> {
     try {
@@ -625,10 +576,49 @@ function App(): JSX.Element {
     }
   }
 
+  function activateEditorTool(tool: EditorToolId): void {
+    setActiveTool(tool)
+    if (tool === 'text') {
+      window.setTimeout(() => quickSubtitleInputRef.current?.focus(), 0)
+      setNotice('文字工具：输入一句话，或点击空画布添加字幕')
+      return
+    }
+    if (tool === 'sticker') {
+      setAssetPrimaryCategory('props')
+      setAssetSubCategory('all')
+      setActiveTrackGroup('effect')
+      setNotice('贴纸工具：选择道具/贴纸素材后会优先放到特效轨')
+      return
+    }
+    if (tool === 'audio') {
+      setAssetPrimaryCategory('audio')
+      setAssetSubCategory('all')
+      setActiveTrackGroup('sfx')
+      setNotice('音频工具：选择音效或 BGM 素材后会放到声音轨')
+      return
+    }
+    if (tool === 'animate') {
+      setNotice('动画工具：用下方 meme 动作给选中片段加贴脸、横跳、抖动或闪白')
+      return
+    }
+    if (tool === 'razor') {
+      setNotice('剃刀工具：点击时间线片段即可切开，按 V 返回选择')
+      return
+    }
+    setNotice('选择/移动工具：拖动画布元素或时间线片段进行调整')
+  }
+
   function addAssetToTimeline(asset: Asset, trackKind: TrackKind = asset.type === 'audio' ? 'music' : 'visual'): void {
     if (!project || !currentPreset) return
-    const trackId = trackKind === 'visual' ? trackIdForVisualAsset(project, asset, selectedItem) : trackIdForKind(project, trackKind, selectedItem)
-    const startFrame = trackKind === 'visual' ? playheadFrame : nextStartFrame(project, trackId)
+    const activeAudioTool = activeTool === 'audio' && (asset.type === 'audio' || hasNativeAudioHint(asset))
+    const activeStickerTool = activeTool === 'sticker' && isVisualAsset(asset)
+    const effectiveTrackKind: TrackKind = activeAudioTool ? 'sfx' : trackKind
+    const trackId = activeStickerTool
+      ? trackByGroupKind(project, 'effect', 'visual')?.id || trackIdForVisualAsset(project, asset, selectedItem)
+      : effectiveTrackKind === 'visual'
+        ? trackIdForVisualAsset(project, asset, selectedItem)
+        : trackIdForKind(project, effectiveTrackKind, selectedItem)
+    const startFrame = effectiveTrackKind === 'visual' ? playheadFrame : nextStartFrame(project, trackId)
     addAssetToTimelineAt(asset, trackId, startFrame)
   }
 
@@ -709,6 +699,7 @@ function App(): JSX.Element {
       timeline: [...project.timeline, item]
     })
     setSelectedItemId(item.id)
+    if (trackKind === 'visual') setPlacementPulseItemId(item.id)
     setPlayheadFrame(startFrame)
     if (trackKind === 'visual' && isGreenScreenAsset(asset)) {
       void detectFirstVisibleFrame(asset, currentPreset.fps, item.keying).then((sourceInFrame) => {
@@ -831,12 +822,17 @@ function App(): JSX.Element {
     setNotice('字幕已按脚本同步到时间轴')
   }
 
-  function addQuickSubtitle(): void {
-    if (!project || !currentPreset) return
-    const text = quickSubtitleText.trim()
+  function createSubtitleAtPlayhead(rawText: string, options: { allowFallback?: boolean; clearInput?: boolean; notice?: string } = {}): TimelineItem | null {
+    if (!project || !currentPreset) return null
+    const text = rawText.trim() || (options.allowFallback ? '新字幕' : '')
     if (!text) {
       setNotice('先输入一句字幕')
-      return
+      return null
+    }
+    const subtitleTrack = project.tracks.find((track) => track.id === 'subtitles')
+    if (subtitleTrack?.locked) {
+      setNotice('字幕轨已锁定，不能添加字幕')
+      return null
     }
     const durationFrames = Math.max(
       currentPreset.fps,
@@ -865,8 +861,23 @@ function App(): JSX.Element {
       timeline: [...project.timeline, subtitleItem]
     })
     setSelectedItemId(subtitleItem.id)
-    setQuickSubtitleText('')
-    setNotice('已添加字幕')
+    setSelectedTrackId(subtitleItem.trackId)
+    if (options.clearInput) setQuickSubtitleText('')
+    setNotice(options.notice || '已添加字幕')
+    return subtitleItem
+  }
+
+  function addQuickSubtitle(): void {
+    createSubtitleAtPlayhead(quickSubtitleText, { clearInput: true })
+  }
+
+  function addCanvasTextSubtitle(): void {
+    const created = createSubtitleAtPlayhead(quickSubtitleText, {
+      allowFallback: true,
+      clearInput: Boolean(quickSubtitleText.trim()),
+      notice: '已在当前播放头添加画布字幕'
+    })
+    if (created) setActiveTool('select')
   }
 
   async function generateAiScript(): Promise<void> {
@@ -990,6 +1001,7 @@ function App(): JSX.Element {
     if (!project || !currentPreset) return
     try {
       setBusy(mode === 'preview' ? '生成预览' : '导出视频')
+      setRenderProgress({ mode, stage: 'preparing', message: mode === 'preview' ? '准备生成预览' : '准备导出视频', percent: 0 })
       const request = {
         project,
         preset: currentPreset,
@@ -1001,8 +1013,10 @@ function App(): JSX.Element {
       if (mode === 'preview') setPreview(result)
       if (mode === 'export') setLastExport(result)
       setNotice(`${mode === 'preview' ? '预览' : '视频'}已生成：${result.outputPath}`)
+      setRenderProgress({ mode, stage: 'done', message: '渲染完成', percent: 1, outputPath: result.outputPath })
     } catch (error) {
       setNotice(errorText(error))
+      setRenderProgress({ mode, stage: 'failed', message: '渲染失败', percent: 1, error: errorText(error) })
     } finally {
       setBusy(null)
     }
@@ -1463,6 +1477,96 @@ function App(): JSX.Element {
     updateSelectedItem({ volume: currentVolume > 0 ? 0 : 1 })
   }
 
+  function applyMemeAction(action: MemeActionId): void {
+    if (!project || !currentPreset || !selectedItem || selectedItem.type !== 'visual') {
+      setNotice('先选中一个画面里的猫/贴纸片段')
+      return
+    }
+    const track = project.tracks.find((entry) => entry.id === selectedItem.trackId)
+    if (track?.locked) {
+      setNotice(`${displayTrackName(track)} 已锁定，不能修改片段`)
+      return
+    }
+
+    const localFrame = localFrameForItem(selectedItem, playheadFrame)
+    const baseTransform = visualTransformAtFrame(selectedItem, localFrame)
+    const frameStep = Math.max(2, Math.round(currentPreset.fps * 0.12))
+    const effectFor = (type: TimelineItem['effects'][number]['type'], intensity: number): TimelineItem['effects'][number] => {
+      const preset = DEFAULT_EFFECTS.find((item) => item.type === type)
+      return { ...(preset || { type, intensity, id: crypto.randomUUID() }), id: crypto.randomUUID(), intensity }
+    }
+
+    if (action === 'flip-x') {
+      patchSelectedVisualTransform((transform) => ({ flipX: !transform.flipX }))
+      setNotice('已水平翻转')
+      return
+    }
+    if (action === 'flip-y') {
+      patchSelectedVisualTransform((transform) => ({ flipY: !transform.flipY }))
+      setNotice('已垂直翻转')
+      return
+    }
+    if (action === 'reset') {
+      patchSelectedVisualTransform(() => ({ x: 0, y: 0, scale: 1, rotation: 0, flipX: false, flipY: false, opacity: 1 }))
+      setNotice('已重置画面变换')
+      return
+    }
+    if (action === 'shake' || action === 'flash') {
+      const nextEffect = effectFor(action, action === 'shake' ? 0.36 : 0.34)
+      updateSelectedItem({
+        effects: [nextEffect, ...selectedItem.effects.filter((effect) => effect.type !== action && effect.type !== 'none')]
+      })
+      setNotice(action === 'shake' ? '已添加抖动效果' : '已添加闪白效果')
+      return
+    }
+    if (action === 'punch-in') {
+      const endFrame = clampNumber(localFrame + Math.round(currentPreset.fps * 0.2), 0, Math.max(0, selectedItem.durationFrames - 1))
+      const zoomTransform = { ...baseTransform, scale: clampNumber(baseTransform.scale * 1.45, 0.08, 4) }
+      updateSelectedItem({
+        keyframes: mergeVisualActionKeyframes(selectedItem, [
+          { frame: localFrame, transform: baseTransform },
+          { frame: endFrame, transform: zoomTransform }
+        ])
+      })
+      setNotice('已添加突然贴脸关键帧')
+      return
+    }
+    if (action === 'side-hop') {
+      const amplitude = Math.round(currentPreset.width * 0.08)
+      updateSelectedItem({
+        keyframes: mergeVisualActionKeyframes(selectedItem, [
+          { frame: localFrame, transform: baseTransform },
+          { frame: localFrame + frameStep, transform: { ...baseTransform, x: baseTransform.x - amplitude } },
+          { frame: localFrame + frameStep * 2, transform: { ...baseTransform, x: baseTransform.x + amplitude } },
+          { frame: localFrame + frameStep * 3, transform: baseTransform }
+        ])
+      })
+      setNotice('已添加左右横跳关键帧')
+      return
+    }
+    if (action === 'repeat') {
+      const itemEnd = selectedItem.startFrame + selectedItem.durationFrames
+      const segmentStart = clampNumber(playheadFrame, selectedItem.startFrame, itemEnd - 1)
+      const segmentDuration = Math.max(1, Math.min(Math.round(currentPreset.fps * 0.5), itemEnd - segmentStart))
+      const sourceInFrame = selectedItem.sourceInFrame + (segmentStart - selectedItem.startFrame)
+      const segmentTransform = visualTransformAtFrame(selectedItem, segmentStart - selectedItem.startFrame)
+      const copies = [1, 2].map((index) => ({
+        ...selectedItem,
+        id: crypto.randomUUID(),
+        startFrame: segmentStart + segmentDuration * index,
+        durationFrames: segmentDuration,
+        sourceInFrame,
+        label: `${selectedItem.label} 复读 ${index}`,
+        transform: segmentTransform,
+        keyframes: undefined
+      }))
+      updateProject({ ...project, timeline: [...project.timeline, ...copies] })
+      setSelectedItemId(copies[0]?.id || selectedItem.id)
+      setPlayheadFrame(copies[0]?.startFrame || playheadFrame)
+      setNotice('已复制当前片段做一键复读')
+    }
+  }
+
   function deleteSelectedItem(): void {
     if (!project || !selectedItem) return
     updateProject({
@@ -1669,6 +1773,11 @@ function App(): JSX.Element {
 
       <section className="statusline">
         <span>{busy ? `${busy}...` : notice}</span>
+        {renderProgress && ['preparing', 'building-filters', 'encoding'].includes(renderProgress.stage) && (
+          <div className="status-progress" title={renderProgress.message}>
+            <span style={{ width: `${Math.round(renderProgress.percent * 100)}%` }} />
+          </div>
+        )}
         {busy && <Loader2 className="spin" size={16} />}
       </section>
 
@@ -1705,25 +1814,31 @@ function App(): JSX.Element {
           <div className="preview-and-inspector preview-canvas-panel">
             <div className="preview-wrap">
               <PanelTitle icon={<Film />} title="预览" />
-              <div className="phone-preview">
-                <QuickPreview
-                  project={project}
-                  items={activeVisualItems}
-                  audioItems={activeAudioItems}
-                  subtitle={activeSubtitleItem}
-                  selectedItemId={selectedItemId}
-                  playheadFrame={playheadFrame}
-                  fps={currentPreset.fps}
-                  presetWidth={currentPreset.width}
-                  presetHeight={currentPreset.height}
-                  isPlaying={isPlaying}
-                  playbackRate={playerSpeed}
-                  onSelect={selectTimelineItem}
-                  onClearSelection={() => setSelectedItemId(null)}
-                  onPatchItem={moveTimelineItem}
-                  onItemContextMenu={openItemContextMenu}
-                  onDropAsset={addAssetToPreview}
-                />
+              <div className="preview-workarea">
+                <EditorToolRail activeTool={activeTool} onChange={activateEditorTool} />
+                <div className="phone-preview">
+                  <QuickPreview
+                    project={project}
+                    items={activeVisualItems}
+                    audioItems={activeAudioItems}
+                    subtitle={activeSubtitleItem}
+                    selectedItemId={selectedItemId}
+                    placementPulseItemId={placementPulseItemId}
+                    playheadFrame={playheadFrame}
+                    fps={currentPreset.fps}
+                    presetWidth={currentPreset.width}
+                    presetHeight={currentPreset.height}
+                    isPlaying={isPlaying}
+                    playbackRate={playerSpeed}
+                    activeTool={activeTool}
+                    onSelect={selectTimelineItem}
+                    onClearSelection={() => setSelectedItemId(null)}
+                    onPatchItem={moveTimelineItem}
+                    onItemContextMenu={openItemContextMenu}
+                    onDropAsset={addAssetToPreview}
+                    onCreateSubtitle={addCanvasTextSubtitle}
+                  />
+                </div>
               </div>
               <div className="preview-controls">
                 <IconButton title="回到开头 Home" onClick={() => setPlayheadFrame(0)} icon={<Rewind />} />
@@ -1741,6 +1856,7 @@ function App(): JSX.Element {
                   <option value={4}>4x</option>
                 </select>
               </div>
+              <MemeActionStrip selectedItem={selectedItem} onAction={applyMemeAction} />
             </div>
           </div>
           <div className="timeline-header">
@@ -1748,6 +1864,7 @@ function App(): JSX.Element {
               <div className="asset-search-row quick-subtitle-input">
                 <Captions size={15} />
                 <input
+                  ref={quickSubtitleInputRef}
                   value={quickSubtitleText}
                   onChange={(event) => setQuickSubtitleText(event.target.value)}
                   onKeyDown={(event) => {
@@ -1830,7 +1947,7 @@ function App(): JSX.Element {
             snapEnabled={timelineSnapEnabled}
             onSnapToggle={() => setTimelineSnapEnabled((value) => !value)}
             razorMode={razorMode}
-            onRazorModeChange={setRazorMode}
+            onRazorModeChange={(enabled) => activateEditorTool(enabled ? 'razor' : 'select')}
             onCutItemAtFrame={cutItemAtFrame}
             onItemContextMenu={openItemContextMenu}
             onDropAsset={(assetId, trackId, frame) => {
@@ -2150,6 +2267,68 @@ function AssetGrid({
   )
 }
 
+function EditorToolRail({ activeTool, onChange }: { activeTool: EditorToolId; onChange: (tool: EditorToolId) => void }): JSX.Element {
+  const tools: Array<{ id: EditorToolId; label: string; shortcut: string; icon: JSX.Element }> = [
+    { id: 'select', label: '选择/移动', shortcut: 'V', icon: <MousePointer2 /> },
+    { id: 'razor', label: '切割', shortcut: 'C', icon: <Scissors /> },
+    { id: 'text', label: '文字', shortcut: 'T', icon: <Type /> },
+    { id: 'sticker', label: '贴纸/道具', shortcut: 'P', icon: <Sticker /> },
+    { id: 'audio', label: '音频', shortcut: 'A', icon: <AudioLines /> },
+    { id: 'animate', label: '动画动作', shortcut: 'E', icon: <WandSparkles /> }
+  ]
+  return (
+    <div className="editor-tool-rail" aria-label="编辑工具">
+      {tools.map((tool) => (
+        <button
+          key={tool.id}
+          type="button"
+          className={activeTool === tool.id ? 'editor-tool-button active' : 'editor-tool-button'}
+          title={`${tool.label} (${tool.shortcut})`}
+          onClick={() => onChange(tool.id)}
+        >
+          {tool.icon}
+          <span>{tool.shortcut}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function MemeActionStrip({ selectedItem, onAction }: { selectedItem: TimelineItem | null; onAction: (action: MemeActionId) => void }): JSX.Element {
+  const hasVisual = selectedItem?.type === 'visual'
+  const actions: Array<{ id: MemeActionId; label: string; icon: JSX.Element }> = [
+    { id: 'punch-in', label: '突然贴脸', icon: <Crosshair /> },
+    { id: 'side-hop', label: '左右横跳', icon: <Move /> },
+    { id: 'shake', label: '抖动', icon: <ZapIcon /> },
+    { id: 'flash', label: '闪白', icon: <Sparkles /> },
+    { id: 'repeat', label: '一键复读', icon: <Repeat2 /> },
+    { id: 'flip-x', label: '水平翻转', icon: <FlipHorizontal /> },
+    { id: 'flip-y', label: '垂直翻转', icon: <FlipVertical /> },
+    { id: 'reset', label: '重置变换', icon: <RotateCcw /> }
+  ]
+  return (
+    <div className="meme-action-strip" aria-label="Meme 动作">
+      {actions.map((action) => (
+        <button
+          key={action.id}
+          type="button"
+          className="meme-action-button"
+          disabled={!hasVisual}
+          title={hasVisual ? action.label : '先选中一个画面片段'}
+          onClick={() => onAction(action.id)}
+        >
+          {action.icon}
+          <span>{action.label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ZapIcon(): JSX.Element {
+  return <Sparkles />
+}
+
 function ShortcutStrip(): JSX.Element {
   return (
     <div className="shortcut-strip">
@@ -2163,7 +2342,13 @@ function ShortcutStrip(): JSX.Element {
       <span>Ctrl+C/V 复制粘贴</span>
       <span>Alt+←/→ 微移</span>
       <span>Ctrl+滚轮 缩放</span>
-      <span>H/V 对称</span>
+      <span>V 选择</span>
+      <span>C 剃刀</span>
+      <span>T 文字</span>
+      <span>P 贴纸</span>
+      <span>A 音频</span>
+      <span>E 动画</span>
+      <span>H/Shift+V 对称</span>
       <span>R 旋转</span>
       <span>M 静音</span>
       <span>Delete 删除</span>
@@ -2682,6 +2867,8 @@ function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const drewFrameRef = useRef(false)
+  const cacheKey = asset.fileUrl || asset.localPath || asset.id
+  const [cachedFrame, setCachedFrame] = useState(() => greenThumbFrameCache.get(cacheKey) || '')
   const [hasFrame, setHasFrame] = useState(false)
   const [fallback, setFallback] = useState(false)
 
@@ -2691,7 +2878,10 @@ function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
     if (!canvas || !media || !mediaReady(media)) return
     canvas.width = 360
     canvas.height = 220
-    drawKeyedFrame(canvas, media, { enabled: true, color: '#00ff00', similarity: 0.28, blend: 0.08 })
+    drawKeyedFrame(canvas, media, { enabled: true, color: '#00ff00', similarity: 0.28, blend: 0.08 }, false)
+    const frame = canvas.toDataURL('image/webp', 0.72)
+    greenThumbFrameCache.set(cacheKey, frame)
+    setCachedFrame(frame)
     drewFrameRef.current = true
     setHasFrame(true)
   }
@@ -2717,15 +2907,17 @@ function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
 
   useEffect(() => {
     drewFrameRef.current = false
+    setCachedFrame(greenThumbFrameCache.get(cacheKey) || '')
     setHasFrame(false)
     setFallback(false)
     const timer = window.setTimeout(() => {
       if (!drewFrameRef.current) setFallback(true)
     }, 1800)
     return () => window.clearTimeout(timer)
-  }, [asset.fileUrl])
+  }, [cacheKey])
 
   if (fallback) return <MediaThumb src={asset.fileUrl} type={asset.type} />
+  if (cachedFrame) return <img className="thumb" src={cachedFrame} alt="" loading="lazy" decoding="async" />
 
   return (
     <div className="thumb green-thumb green-video-thumb">
@@ -2749,6 +2941,8 @@ function GreenScreenVideoThumb({ asset }: { asset: Asset }): JSX.Element {
 function GreenScreenAssetThumb({ asset }: { asset: Asset }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
+  const cacheKey = asset.fileUrl || asset.localPath || asset.id
+  const [cachedFrame, setCachedFrame] = useState(() => greenThumbFrameCache.get(cacheKey) || '')
 
   function draw(): void {
     const canvas = canvasRef.current
@@ -2756,13 +2950,19 @@ function GreenScreenAssetThumb({ asset }: { asset: Asset }): JSX.Element {
     if (!canvas || !media || !mediaReady(media)) return
     canvas.width = 360
     canvas.height = 220
-    drawKeyedFrame(canvas, media, { enabled: true, color: '#00ff00', similarity: 0.28, blend: 0.08 })
+    drawKeyedFrame(canvas, media, { enabled: true, color: '#00ff00', similarity: 0.28, blend: 0.08 }, false)
+    const frame = canvas.toDataURL('image/webp', 0.72)
+    greenThumbFrameCache.set(cacheKey, frame)
+    setCachedFrame(frame)
   }
 
   useEffect(() => {
+    setCachedFrame(greenThumbFrameCache.get(cacheKey) || '')
     const timer = window.setTimeout(draw, 120)
     return () => window.clearTimeout(timer)
-  }, [asset.fileUrl, asset.type])
+  }, [asset.type, cacheKey])
+
+  if (cachedFrame) return <img className="thumb" src={cachedFrame} alt="" loading="lazy" decoding="async" />
 
   return (
     <div className="thumb green-thumb">
@@ -2781,40 +2981,51 @@ function QuickPreview({
   audioItems,
   subtitle,
   selectedItemId,
+  placementPulseItemId,
   playheadFrame,
   fps,
   presetWidth,
   presetHeight,
   isPlaying,
   playbackRate,
+  activeTool,
   onSelect,
   onClearSelection,
   onPatchItem,
   onItemContextMenu,
-  onDropAsset
+  onDropAsset,
+  onCreateSubtitle
 }: {
   project: ProjectFile
   items: TimelineItem[]
   audioItems: TimelineItem[]
   subtitle: TimelineItem | null
   selectedItemId: string | null
+  placementPulseItemId: string | null
   playheadFrame: number
   fps: number
   presetWidth: number
   presetHeight: number
   isPlaying: boolean
   playbackRate: number
+  activeTool: EditorToolId
   onSelect: (id: string) => void
   onClearSelection: () => void
   onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
   onDropAsset: (assetId: string, clientX: number, clientY: number, stage: HTMLElement) => void
+  onCreateSubtitle: () => void
 }): JSX.Element {
   const subtitleText = subtitle?.text || ''
-  const subtitleStyle = normalizeSubtitleStyle(project.subtitleStyle, subtitle?.style)
-  const speakerPosition = subtitle?.speakerPosition || subtitleStyle.position
   const wheelTarget = items.find((item) => item.id === selectedItemId) || items[items.length - 1]
   const stageStyle = previewStageStyle(presetWidth, presetHeight)
+  const selectedVisualItem = items.find((item) => item.id === selectedItemId) || null
+  const selectedSubtitleItem = subtitle?.id === selectedItemId ? subtitle : null
+  const selectedTransform = selectedVisualItem
+    ? visualTransformAtFrame(selectedVisualItem, localFrameForItem(selectedVisualItem, playheadFrame))
+    : selectedSubtitleItem
+      ? normalizeTransform(selectedSubtitleItem.transform)
+      : null
 
   function handleDrop(event: DragEvent<HTMLDivElement>): void {
     event.preventDefault()
@@ -2833,7 +3044,12 @@ function QuickPreview({
       onDrop={handleDrop}
       onPointerDown={(event) => {
         const target = event.target as HTMLElement
-        if (!target.closest('.preview-hitbox')) onClearSelection()
+        if (target.closest('.preview-hitbox') || target.closest('.preview-text-hitbox')) return
+        if (activeTool === 'text') {
+          onCreateSubtitle()
+          return
+        }
+        onClearSelection()
       }}
       onWheel={(event) => {
         if (!event.ctrlKey || !wheelTarget) return
@@ -2851,8 +3067,11 @@ function QuickPreview({
           <span>把素材拖到这里，直接放进画面</span>
         </div>
       )}
+      {selectedTransform && activeTool === 'select' && Math.abs(selectedTransform.x) <= presetWidth * 0.015 && <div className="preview-center-guide vertical" />}
+      {selectedTransform && activeTool === 'select' && Math.abs(selectedTransform.y) <= presetHeight * 0.015 && <div className="preview-center-guide horizontal" />}
       {items.map((item) => {
         const asset = item.assetId ? project.assets.find((asset) => asset.id === item.assetId) : null
+        const track = project.tracks.find((track) => track.id === item.trackId)
         if (!asset?.fileUrl) return null
         return (
           <QuickPreviewLayer
@@ -2860,11 +3079,14 @@ function QuickPreview({
             item={item}
             asset={asset}
             selected={selectedItemId === item.id}
+            recentlyPlaced={placementPulseItemId === item.id}
             playheadFrame={playheadFrame}
             fps={fps}
             presetWidth={presetWidth}
             presetHeight={presetHeight}
             isPlaying={isPlaying}
+            activeTool={activeTool}
+            locked={Boolean(track?.locked)}
             onSelect={onSelect}
             onPatchItem={onPatchItem}
             onItemContextMenu={onItemContextMenu}
@@ -2872,15 +3094,206 @@ function QuickPreview({
         )
       })}
       <PreviewAudioBridge project={project} items={audioItems} playheadFrame={playheadFrame} fps={fps} isPlaying={isPlaying} playbackRate={playbackRate} />
-      {subtitle?.speakerVisible && subtitle.speakerName && (
-        <div className={`preview-speaker speaker-${speakerPosition}`}>{subtitle.speakerName}</div>
-      )}
-      {subtitleText && (
-        <div className={`preview-subtitle subtitle-${subtitleStyle.position}`} style={previewSubtitleCss(subtitleStyle)}>
-          {subtitleText}
-        </div>
+      {subtitle && (subtitleText || (subtitle.speakerVisible && subtitle.speakerName)) && (
+        <QuickPreviewTextLayer
+          item={subtitle}
+          project={project}
+          selected={selectedItemId === subtitle.id}
+          activeTool={activeTool}
+          presetWidth={presetWidth}
+          presetHeight={presetHeight}
+          onSelect={onSelect}
+          onPatchItem={onPatchItem}
+          onItemContextMenu={onItemContextMenu}
+        />
       )}
     </div>
+  )
+}
+
+function QuickPreviewTextLayer({
+  item,
+  project,
+  selected,
+  activeTool,
+  presetWidth,
+  presetHeight,
+  onSelect,
+  onPatchItem,
+  onItemContextMenu
+}: {
+  item: TimelineItem
+  project: ProjectFile
+  selected: boolean
+  activeTool: EditorToolId
+  presetWidth: number
+  presetHeight: number
+  onSelect: (id: string) => void
+  onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
+  onItemContextMenu: (id: string, clientX: number, clientY: number) => void
+}): JSX.Element {
+  const itemRef = useRef(item)
+  const patchItemRef = useRef(onPatchItem)
+  const [dragState, setDragState] = useState<{
+    mode: TransformHandleId
+    startX: number
+    startY: number
+    startTransform: NormalizedTransform
+    stageWidth: number
+    stageHeight: number
+    centerX: number
+    centerY: number
+    startDistance: number
+    startAngle: number
+  } | null>(null)
+  const transform = normalizeTransform(item.transform)
+  const subtitleStyle = normalizeSubtitleStyle(project.subtitleStyle, item.style)
+  const hasText = Boolean(item.text?.trim())
+  const hasSpeaker = Boolean(item.speakerVisible && item.speakerName?.trim())
+  const canTransform = selected && (activeTool === 'select' || activeTool === 'text')
+
+  useEffect(() => {
+    itemRef.current = item
+  }, [item])
+
+  useEffect(() => {
+    patchItemRef.current = onPatchItem
+  }, [onPatchItem])
+
+  useEffect(() => {
+    if (!dragState) return
+    const activeDrag = dragState
+    let animationFrame: number | null = null
+    let pendingPatch: Partial<TimelineItem> | null = null
+
+    function flushPatch(): void {
+      animationFrame = null
+      const patch = pendingPatch
+      pendingPatch = null
+      if (patch) patchItemRef.current(itemRef.current.id, patch)
+    }
+
+    function schedulePatch(patch: Partial<TimelineItem>): void {
+      pendingPatch = patch
+      if (animationFrame === null) animationFrame = window.requestAnimationFrame(flushPatch)
+    }
+
+    function onPointerMove(event: globalThis.PointerEvent): void {
+      let nextTransform: NormalizedTransform
+      if (activeDrag.mode === 'rotate') {
+        const angle = (Math.atan2(event.clientY - activeDrag.centerY, event.clientX - activeDrag.centerX) * 180) / Math.PI
+        const delta = angle - activeDrag.startAngle
+        const rotation = event.shiftKey ? Math.round((activeDrag.startTransform.rotation + delta) / 15) * 15 : activeDrag.startTransform.rotation + delta
+        nextTransform = { ...activeDrag.startTransform, rotation: Math.round(rotation) }
+      } else if (activeDrag.mode.startsWith('scale')) {
+        const distance = Math.hypot(event.clientX - activeDrag.centerX, event.clientY - activeDrag.centerY)
+        const scaleRatio = distance / Math.max(8, activeDrag.startDistance)
+        nextTransform = { ...activeDrag.startTransform, scale: clampNumber(activeDrag.startTransform.scale * scaleRatio, 0.08, 4) }
+      } else {
+        nextTransform = {
+          ...activeDrag.startTransform,
+          x: Math.round(activeDrag.startTransform.x + ((event.clientX - activeDrag.startX) / activeDrag.stageWidth) * presetWidth),
+          y: Math.round(activeDrag.startTransform.y + ((event.clientY - activeDrag.startY) / activeDrag.stageHeight) * presetHeight)
+        }
+      }
+      schedulePatch({ transform: nextTransform })
+    }
+
+    function onPointerUp(): void {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+        flushPatch()
+      }
+      setDragState(null)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp, { once: true })
+    return () => {
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+  }, [dragState, presetHeight, presetWidth])
+
+  function beginTextDrag(event: PointerEvent<HTMLElement>, mode: TransformHandleId = 'move'): void {
+    event.preventDefault()
+    event.stopPropagation()
+    onSelect(item.id)
+    if (activeTool !== 'select' && activeTool !== 'text') return
+    const stage = event.currentTarget.closest<HTMLElement>('.quick-preview-stage')
+    const hitbox = event.currentTarget.closest<HTMLElement>('.preview-text-hitbox')
+    const stageBounds = stage?.getBoundingClientRect()
+    const hitboxBounds = hitbox?.getBoundingClientRect()
+    const centerX = (hitboxBounds?.left || event.clientX) + (hitboxBounds?.width || 0) / 2
+    const centerY = (hitboxBounds?.top || event.clientY) + (hitboxBounds?.height || 0) / 2
+    setDragState({
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      startTransform: transform,
+      stageWidth: stageBounds?.width || 540,
+      stageHeight: stageBounds?.height || 960,
+      centerX,
+      centerY,
+      startDistance: Math.hypot(event.clientX - centerX, event.clientY - centerY),
+      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI
+    })
+  }
+
+  function renderHandles(): JSX.Element | null {
+    if (!canTransform) return null
+    return (
+      <>
+        <span className="preview-transform-center" title="拖动移动" />
+        <span className="preview-transform-handle scale-nw" title="缩放" onPointerDown={(event) => beginTextDrag(event, 'scale-nw')} />
+        <span className="preview-transform-handle scale-ne" title="缩放" onPointerDown={(event) => beginTextDrag(event, 'scale-ne')} />
+        <span className="preview-transform-handle scale-sw" title="缩放" onPointerDown={(event) => beginTextDrag(event, 'scale-sw')} />
+        <span className="preview-transform-handle scale-se" title="缩放" onPointerDown={(event) => beginTextDrag(event, 'scale-se')} />
+        <span className="preview-transform-rotate" title="旋转，按 Shift 吸附 15°" onPointerDown={(event) => beginTextDrag(event, 'rotate')}>
+          <RotateCcw size={13} />
+        </span>
+      </>
+    )
+  }
+
+  return (
+    <>
+      {hasSpeaker && (
+        <div className="preview-text-layer speaker-layer" style={previewTextLayerStyle('speaker', item.speakerPosition || subtitleStyle.position, transform, presetWidth, presetHeight)}>
+          <div
+            className={`preview-text-hitbox ${selected ? 'selected' : ''}`}
+            onPointerDown={(event) => beginTextDrag(event)}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              onItemContextMenu(item.id, event.clientX, event.clientY)
+            }}
+          >
+            <div className={`preview-speaker speaker-${item.speakerPosition || subtitleStyle.position}`}>{item.speakerName}</div>
+            {!hasText && renderHandles()}
+          </div>
+        </div>
+      )}
+      {hasText && (
+        <div className="preview-text-layer subtitle-layer" style={previewTextLayerStyle('subtitle', subtitleStyle.position, transform, presetWidth, presetHeight)}>
+          <div
+            className={`preview-text-hitbox ${selected ? 'selected' : ''}`}
+            onPointerDown={(event) => beginTextDrag(event)}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              onItemContextMenu(item.id, event.clientX, event.clientY)
+            }}
+          >
+            <div className={`preview-subtitle subtitle-${subtitleStyle.position}`} style={previewSubtitleCss(subtitleStyle)}>
+              {item.text}
+            </div>
+            {renderHandles()}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -2888,11 +3301,14 @@ function QuickPreviewLayer({
   item,
   asset,
   selected,
+  recentlyPlaced,
   playheadFrame,
   fps,
   presetWidth,
   presetHeight,
   isPlaying,
+  activeTool,
+  locked,
   onSelect,
   onPatchItem,
   onItemContextMenu
@@ -2900,11 +3316,14 @@ function QuickPreviewLayer({
   item: TimelineItem
   asset: Asset
   selected: boolean
+  recentlyPlaced: boolean
   playheadFrame: number
   fps: number
   presetWidth: number
   presetHeight: number
   isPlaying: boolean
+  activeTool: EditorToolId
+  locked: boolean
   onSelect: (id: string) => void
   onPatchItem: (id: string, patch: Partial<TimelineItem>) => void
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
@@ -2913,12 +3332,17 @@ function QuickPreviewLayer({
   const itemRef = useRef(item)
   const patchItemRef = useRef(onPatchItem)
   const [dragState, setDragState] = useState<{
+    mode: TransformHandleId
     startX: number
     startY: number
     localFrame: number
     startTransform: NormalizedTransform
     stageWidth: number
     stageHeight: number
+    centerX: number
+    centerY: number
+    startDistance: number
+    startAngle: number
   } | null>(null)
   const [mediaSize, setMediaSize] = useState(() => mediaCanvasSize(asset))
   const [visibleBounds, setVisibleBounds] = useState<VisibleBounds>({ left: 0, top: 0, width: 1, height: 1 })
@@ -2928,9 +3352,14 @@ function QuickPreviewLayer({
   const localFrame = localFrameForItem(item, playheadFrame)
   const currentSeconds = mediaPlaybackSeconds(item, asset, localFrame, fps)
   const transform = visualTransformAtFrame(item, localFrame)
+  const effectState = applyTimelineEffects(item, transform, localFrame, fps, presetWidth, presetHeight)
   const keying = normalizeKeying(item.keying)
   const shouldKey = keying.enabled && !alphaVariant
-  const style = previewLayerStyle(item, asset, transform, presetWidth, presetHeight, mediaSize)
+  const style = {
+    ...previewLayerStyle(item, asset, effectState.transform, presetWidth, presetHeight, mediaSize),
+    ...(effectState.filter ? { filter: effectState.filter } : {})
+  }
+  const canTransform = selected && (activeTool === 'select' || activeTool === 'text') && !locked
 
   useEffect(() => {
     itemRef.current = item
@@ -2980,10 +3409,22 @@ function QuickPreviewLayer({
     }
 
     function onPointerMove(event: globalThis.PointerEvent): void {
-      const nextTransform = {
-        ...activeDrag.startTransform,
-        x: Math.round(activeDrag.startTransform.x + ((event.clientX - activeDrag.startX) / activeDrag.stageWidth) * presetWidth),
-        y: Math.round(activeDrag.startTransform.y + ((event.clientY - activeDrag.startY) / activeDrag.stageHeight) * presetHeight)
+      let nextTransform: NormalizedTransform
+      if (activeDrag.mode === 'rotate') {
+        const angle = (Math.atan2(event.clientY - activeDrag.centerY, event.clientX - activeDrag.centerX) * 180) / Math.PI
+        const delta = angle - activeDrag.startAngle
+        const rotation = event.shiftKey ? Math.round((activeDrag.startTransform.rotation + delta) / 15) * 15 : activeDrag.startTransform.rotation + delta
+        nextTransform = { ...activeDrag.startTransform, rotation: Math.round(rotation) }
+      } else if (activeDrag.mode.startsWith('scale')) {
+        const distance = Math.hypot(event.clientX - activeDrag.centerX, event.clientY - activeDrag.centerY)
+        const scaleRatio = distance / Math.max(8, activeDrag.startDistance)
+        nextTransform = { ...activeDrag.startTransform, scale: clampNumber(activeDrag.startTransform.scale * scaleRatio, 0.08, 4) }
+      } else {
+        nextTransform = {
+          ...activeDrag.startTransform,
+          x: Math.round(activeDrag.startTransform.x + ((event.clientX - activeDrag.startX) / activeDrag.stageWidth) * presetWidth),
+          y: Math.round(activeDrag.startTransform.y + ((event.clientY - activeDrag.startY) / activeDrag.stageHeight) * presetHeight)
+        }
       }
       schedulePatch(patchVisualTransformAtFrame(itemRef.current, activeDrag.localFrame, nextTransform))
     }
@@ -3008,16 +3449,48 @@ function QuickPreviewLayer({
   function beginStageDrag(event: PointerEvent<HTMLDivElement>): void {
     event.preventDefault()
     event.stopPropagation()
+    onSelect(item.id)
+    if (locked || (activeTool !== 'select' && activeTool !== 'text')) return
     const stage = event.currentTarget.closest<HTMLElement>('.quick-preview-stage')
     const bounds = stage?.getBoundingClientRect()
-    onSelect(item.id)
     setDragState({
+      mode: 'move',
       startX: event.clientX,
       startY: event.clientY,
       localFrame,
       startTransform: transform,
       stageWidth: bounds?.width || 540,
-      stageHeight: bounds?.height || 960
+      stageHeight: bounds?.height || 960,
+      centerX: 0,
+      centerY: 0,
+      startDistance: 0,
+      startAngle: 0
+    })
+  }
+
+  function beginTransformDrag(event: PointerEvent<HTMLElement>, mode: TransformHandleId): void {
+    event.preventDefault()
+    event.stopPropagation()
+    onSelect(item.id)
+    if (locked || (activeTool !== 'select' && activeTool !== 'text')) return
+    const stage = event.currentTarget.closest<HTMLElement>('.quick-preview-stage')
+    const hitbox = event.currentTarget.closest<HTMLElement>('.preview-hitbox')
+    const stageBounds = stage?.getBoundingClientRect()
+    const hitboxBounds = hitbox?.getBoundingClientRect()
+    const centerX = (hitboxBounds?.left || event.clientX) + (hitboxBounds?.width || 0) / 2
+    const centerY = (hitboxBounds?.top || event.clientY) + (hitboxBounds?.height || 0) / 2
+    setDragState({
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      localFrame,
+      startTransform: transform,
+      stageWidth: stageBounds?.width || 540,
+      stageHeight: stageBounds?.height || 960,
+      centerX,
+      centerY,
+      startDistance: Math.hypot(event.clientX - centerX, event.clientY - centerY),
+      startAngle: (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI
     })
   }
 
@@ -3043,6 +3516,7 @@ function QuickPreviewLayer({
         item={item}
         currentSeconds={currentSeconds}
         isPlaying={isPlaying}
+        measureBounds={selected || !isPlaying}
         onMediaSize={setMediaSize}
         onVisibleBounds={updateVisibleBounds}
       />
@@ -3059,7 +3533,7 @@ function QuickPreviewLayer({
     <div className="preview-layer" style={style}>
       {content}
       <div
-        className={`preview-hitbox ${selected ? 'selected' : ''}`}
+        className={`preview-hitbox ${selected ? 'selected' : ''} ${recentlyPlaced ? 'recently-placed' : ''} ${locked ? 'locked' : ''}`}
         style={visibleBoundsStyle(visibleBounds)}
         onPointerDown={beginStageDrag}
         onContextMenu={(event) => {
@@ -3067,7 +3541,20 @@ function QuickPreviewLayer({
           event.stopPropagation()
           onItemContextMenu(item.id, event.clientX, event.clientY)
         }}
-      />
+      >
+        {canTransform && (
+          <>
+            <span className="preview-transform-center" title="拖动移动" />
+            <span className="preview-transform-handle scale-nw" title="缩放" onPointerDown={(event) => beginTransformDrag(event, 'scale-nw')} />
+            <span className="preview-transform-handle scale-ne" title="缩放" onPointerDown={(event) => beginTransformDrag(event, 'scale-ne')} />
+            <span className="preview-transform-handle scale-sw" title="缩放" onPointerDown={(event) => beginTransformDrag(event, 'scale-sw')} />
+            <span className="preview-transform-handle scale-se" title="缩放" onPointerDown={(event) => beginTransformDrag(event, 'scale-se')} />
+            <span className="preview-transform-rotate" title="旋转，按 Shift 吸附 15°" onPointerDown={(event) => beginTransformDrag(event, 'rotate')}>
+              <RotateCcw size={13} />
+            </span>
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -3139,6 +3626,7 @@ function KeyedMediaCanvas({
   item,
   currentSeconds,
   isPlaying,
+  measureBounds,
   onMediaSize,
   onVisibleBounds
 }: {
@@ -3146,6 +3634,7 @@ function KeyedMediaCanvas({
   item: TimelineItem
   currentSeconds: number
   isPlaying: boolean
+  measureBounds: boolean
   onMediaSize: (size: { width: number; height: number }) => void
   onVisibleBounds: (bounds: VisibleBounds) => void
 }): JSX.Element {
@@ -3177,10 +3666,14 @@ function KeyedMediaCanvas({
       const canvas = canvasRef.current
       const media = asset.type === 'video' ? videoRef.current : imageRef.current
       if (canvas && media && mediaReady(media)) {
-        const bounds = drawKeyedFrame(canvas, media, keying)
-        onVisibleBounds(bounds && isUsefulForegroundBounds(bounds) ? bounds : { left: 0, top: 0, width: 1, height: 1 })
+        const bounds = drawKeyedFrame(canvas, media, keying, measureBounds)
+        if (measureBounds) {
+          onVisibleBounds(bounds && isUsefulForegroundBounds(bounds) ? bounds : { left: 0, top: 0, width: 1, height: 1 })
+        }
       }
-      frame = window.requestAnimationFrame(draw)
+      if (asset.type === 'video' && isPlaying) {
+        frame = window.requestAnimationFrame(draw)
+      }
     }
 
     draw()
@@ -3188,7 +3681,7 @@ function KeyedMediaCanvas({
       stopped = true
       window.cancelAnimationFrame(frame)
     }
-  }, [asset.type, keying.blend, keying.color, keying.enabled, keying.similarity, onVisibleBounds])
+  }, [asset.type, currentSeconds, isPlaying, keying.blend, keying.color, keying.enabled, keying.similarity, measureBounds, onVisibleBounds])
 
   return (
     <>
@@ -4584,6 +5077,80 @@ function previewLayerStyle(
   }
 }
 
+function previewTextLayerStyle(
+  kind: 'speaker' | 'subtitle',
+  position: ProjectFile['subtitleStyle']['position'],
+  transform: ReturnType<typeof normalizeTransform>,
+  presetWidth: number,
+  presetHeight: number
+): CSSProperties {
+  const baseY = kind === 'speaker' ? speakerPositionPercent(position) : subtitlePositionPercent(position)
+  return {
+    left: `${50 + (transform.x / presetWidth) * 100}%`,
+    top: `${baseY + (transform.y / presetHeight) * 100}%`,
+    width: kind === 'speaker' ? '78%' : '86%',
+    transform: `translate(-50%, -50%) rotate(${transform.rotation}deg) scale(${transform.scale})`,
+    opacity: transform.opacity
+  }
+}
+
+function subtitlePositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
+  if (position === 'top') return 30
+  if (position === 'middle') return 50
+  return 91
+}
+
+function speakerPositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
+  if (position === 'top') return 6
+  if (position === 'middle') return 38
+  return 96
+}
+
+function applyTimelineEffects(
+  item: TimelineItem,
+  transform: NormalizedTransform,
+  localFrame: number,
+  fps: number,
+  presetWidth: number,
+  presetHeight: number
+): { transform: NormalizedTransform; filter?: string } {
+  const durationFrames = Math.max(1, item.durationFrames)
+  const progress = clampNumber(localFrame / durationFrames, 0, 1)
+  let nextTransform = { ...transform }
+  let brightness = 1
+  let saturation = 1
+
+  item.effects.forEach((effect) => {
+    const intensity = clampNumber(effect.intensity, 0, 1)
+    if (effect.type === 'zoom-in') {
+      nextTransform = { ...nextTransform, scale: clampNumber(nextTransform.scale * (1 + intensity * progress), 0.08, 4) }
+    } else if (effect.type === 'zoom-out') {
+      nextTransform = { ...nextTransform, scale: clampNumber(nextTransform.scale * (1 + intensity * (1 - progress)), 0.08, 4) }
+    } else if (effect.type === 'pan-left') {
+      nextTransform = { ...nextTransform, x: nextTransform.x + Math.round(presetWidth * intensity * (0.5 - progress) * 0.5) }
+    } else if (effect.type === 'pan-right') {
+      nextTransform = { ...nextTransform, x: nextTransform.x + Math.round(presetWidth * intensity * (progress - 0.5) * 0.5) }
+    } else if (effect.type === 'shake') {
+      const wave = localFrame * 2.35
+      nextTransform = {
+        ...nextTransform,
+        x: nextTransform.x + Math.round(Math.sin(wave) * presetWidth * intensity * 0.018),
+        y: nextTransform.y + Math.round(Math.cos(wave * 1.17) * presetHeight * intensity * 0.012),
+        rotation: nextTransform.rotation + Math.sin(wave * 0.77) * intensity * 5
+      }
+    } else if (effect.type === 'flash') {
+      const pulse = Math.max(0, Math.sin(progress * Math.PI))
+      brightness += pulse * intensity * 1.25
+      saturation += pulse * intensity * 0.25
+    }
+  })
+
+  return {
+    transform: nextTransform,
+    filter: brightness > 1.001 || saturation > 1.001 ? `brightness(${brightness.toFixed(3)}) saturate(${saturation.toFixed(3)})` : undefined
+  }
+}
+
 function visibleBoundsStyle(bounds: VisibleBounds): CSSProperties {
   const left = clampNumber(bounds.left, 0, 1)
   const top = clampNumber(bounds.top, 0, 1)
@@ -5123,6 +5690,7 @@ function countAssetsForCategory(assets: Asset[], category: AssetPrimaryCategory)
 function assetBadges(asset: Asset): string[] {
   const badges = [assetTypeName(asset.type)]
   if (isGreenScreenAsset(asset)) badges.push('绿幕')
+  if (greenAlphaVariant(asset)) badges.push('透明缓存')
   if (hasNativeAudioHint(asset)) badges.push('有声')
   if (asset.duration) badges.push(formatDurationSeconds(asset.duration))
   if (asset.width && asset.height) badges.push(`${asset.width}x${asset.height}`)
@@ -5406,6 +5974,29 @@ function upsertVisualKeyframe(item: TimelineItem, localFrame: number, transform 
   return keyframes.sort((a, b) => a.frame - b.frame)
 }
 
+function mergeVisualActionKeyframes(
+  item: TimelineItem,
+  actionFrames: Array<{ frame: number; transform: NormalizedTransform }>
+): VisualKeyframe[] {
+  const maxFrame = Math.max(0, item.durationFrames - 1)
+  const byFrame = new Map<number, VisualKeyframe>()
+  visualKeyframes(item).forEach((keyframe) => byFrame.set(keyframe.frame, keyframe))
+  actionFrames.forEach(({ frame, transform }) => {
+    const safeFrame = clampNumber(Math.round(frame), 0, maxFrame)
+    const existing = byFrame.get(safeFrame)
+    byFrame.set(safeFrame, {
+      id: existing?.id || crypto.randomUUID(),
+      frame: safeFrame,
+      x: Math.round(transform.x),
+      y: Math.round(transform.y),
+      scale: Number(transform.scale.toFixed(3)),
+      rotation: Math.round(transform.rotation),
+      opacity: Number(transform.opacity.toFixed(3))
+    })
+  })
+  return [...byFrame.values()].sort((a, b) => a.frame - b.frame)
+}
+
 function removeVisualKeyframe(item: TimelineItem, localFrame: number): VisualKeyframe[] {
   const frame = clampNumber(Math.round(localFrame), 0, Math.max(0, item.durationFrames - 1))
   return visualKeyframes(item).filter((keyframe) => keyframe.frame !== frame)
@@ -5480,7 +6071,8 @@ function mediaReady(media: HTMLVideoElement | HTMLImageElement): boolean {
 function drawKeyedFrame(
   canvas: HTMLCanvasElement,
   media: HTMLVideoElement | HTMLImageElement,
-  keying: ReturnType<typeof normalizeKeying>
+  keying: ReturnType<typeof normalizeKeying>,
+  measureBounds = true
 ): VisibleBounds | null {
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) return null
@@ -5516,7 +6108,7 @@ function drawKeyedFrame(
     } else if (distance < hard + soft) {
       data[index + 3] = Math.round(255 * ((distance - hard) / soft))
     }
-    if (data[index + 3] > 12) {
+    if (measureBounds && data[index + 3] > 12) {
       const pixel = index / 4
       const px = pixel % canvas.width
       const py = Math.floor(pixel / canvas.width)
@@ -5527,6 +6119,7 @@ function drawKeyedFrame(
     }
   }
   context.putImageData(image, 0, 0)
+  if (!measureBounds) return null
   if (maxX < minX || maxY < minY) return null
   return {
     left: minX / canvas.width,
@@ -5642,27 +6235,53 @@ function hexToRgb(hex: string): [number, number, number] {
   ]
 }
 
-function findActiveVisualItems(project: ProjectFile | null, frame: number, soloGroup?: TrackGroupId | null): TimelineItem[] {
-  if (!project) return []
+function createTimelineLookup(project: ProjectFile): TimelineLookup {
   const trackOrder = new Map(project.tracks.map((track, index) => [track.id, index]))
   const timelineOrder = new Map(project.timeline.map((item, index) => [item.id, index]))
-  const visibleTracks = new Set(project.tracks.filter((track) => !track.muted && (!soloGroup || trackGroupId(track) === soloGroup)).map((track) => track.id))
-  return project.timeline
-    .filter((item) => item.type === 'visual' && visibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
-    .sort((a, b) => (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) || (timelineOrder.get(a.id) ?? 0) - (timelineOrder.get(b.id) ?? 0))
-}
+  const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]))
+  const visibleTrackIdsByScope = new Map<TrackGroupId | 'all', Set<string>>()
+  const itemsByType = new Map<TrackKind, TimelineItem[]>()
 
-function findPreviewAudioItems(project: ProjectFile | null, frame: number, soloGroup?: TrackGroupId | null): TimelineItem[] {
-  if (!project) return []
-  const assets = new Map(project.assets.map((asset) => [asset.id, asset]))
-  const audibleTracks = new Set(project.tracks.filter((track) => !track.muted && (!soloGroup || trackGroupId(track) === soloGroup)).map((track) => track.id))
-  return project.timeline.filter((item) => {
-    if (!audibleTracks.has(item.trackId)) return false
-    if (!item.assetId || frame < item.startFrame || frame >= item.startFrame + item.durationFrames) return false
+  visibleTrackIdsByScope.set('all', new Set(project.tracks.filter((track) => !track.muted).map((track) => track.id)))
+  TRACK_GROUPS.forEach((group) => {
+    visibleTrackIdsByScope.set(
+      group.id,
+      new Set(project.tracks.filter((track) => !track.muted && trackGroupId(track) === group.id).map((track) => track.id))
+    )
+  })
+  project.timeline.forEach((item) => {
+    const items = itemsByType.get(item.type) || []
+    items.push(item)
+    itemsByType.set(item.type, items)
+  })
+
+  const visualItems = (itemsByType.get('visual') || []).sort(
+    (a, b) => (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) || (timelineOrder.get(a.id) ?? 0) - (timelineOrder.get(b.id) ?? 0)
+  )
+  const previewAudioItems = project.timeline.filter((item) => {
+    if (!item.assetId) return false
     if (['voice', 'music', 'sfx'].includes(item.type)) return true
-    const asset = assets.get(item.assetId)
+    const asset = assetsById.get(item.assetId)
     return item.type === 'visual' && asset?.type === 'video' && (item.volume ?? 1) > 0
   })
+
+  return { trackOrder, timelineOrder, assetsById, visibleTrackIdsByScope, visualItems, previewAudioItems, itemsByType }
+}
+
+function visibleTrackIdsForScope(lookup: TimelineLookup, soloGroup?: TrackGroupId | null): Set<string> {
+  return lookup.visibleTrackIdsByScope.get(soloGroup || 'all') || lookup.visibleTrackIdsByScope.get('all') || new Set()
+}
+
+function findActiveVisualItems(lookup: TimelineLookup | null, frame: number, soloGroup?: TrackGroupId | null): TimelineItem[] {
+  if (!lookup) return []
+  const visibleTracks = visibleTrackIdsForScope(lookup, soloGroup)
+  return lookup.visualItems.filter((item) => visibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
+}
+
+function findPreviewAudioItems(lookup: TimelineLookup | null, frame: number, soloGroup?: TrackGroupId | null): TimelineItem[] {
+  if (!lookup) return []
+  const audibleTracks = visibleTrackIdsForScope(lookup, soloGroup)
+  return lookup.previewAudioItems.filter((item) => audibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
 }
 
 function canMoveItemToTrack(project: ProjectFile, item: TimelineItem, trackId: string): boolean {
@@ -5854,11 +6473,12 @@ function scriptLines(script: string): string[] {
     .filter(Boolean)
 }
 
-function findActiveItem(project: ProjectFile | null, frame: number, type: TrackKind): TimelineItem | null {
-  if (!project) return null
+function findActiveItem(lookup: TimelineLookup | null, frame: number, type: TrackKind, soloGroup?: TrackGroupId | null): TimelineItem | null {
+  if (!lookup) return null
+  const visibleTracks = visibleTrackIdsForScope(lookup, soloGroup)
   return (
-    project.timeline
-      .filter((item) => item.type === type && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
+    (lookup.itemsByType.get(type) || [])
+      .filter((item) => visibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
       .sort((a, b) => b.startFrame - a.startFrame)[0] || null
   )
 }

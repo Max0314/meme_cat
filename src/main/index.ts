@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } fr
 import { join } from 'node:path'
 import path from 'node:path'
 import { is } from '@electron-toolkit/utils'
-import type { AppSettings, CharacterRole, GreenScreenPreprocessProgress, ProjectFile, TimelineTrack } from '../shared/types'
+import type { AppSettings, CharacterRole, GreenScreenPreprocessProgress, ProjectFile, RenderProgress, TimelineTrack } from '../shared/types'
 import { CAT_MEME_TEMPLATES } from '../shared/templates'
 import { EXPORT_PRESETS } from '../shared/presets'
 import { downloadAsset, importLocalAsset, loadAssetIndex, preprocessGreenScreenAssets, searchAssets } from './assetService'
@@ -123,11 +123,15 @@ function registerIpc(): void {
 
   ipcMain.handle('render.preview', async (_event, request) => {
     const info = await ensureWorkspace()
-    return renderProject(info, { ...request, mode: 'preview' })
+    return renderProject(info, { ...request, mode: 'preview' }, (progress: RenderProgress) => {
+      mainWindow?.webContents.send('render.progress', progress)
+    })
   })
   ipcMain.handle('render.export', async (_event, request) => {
     const info = await ensureWorkspace()
-    return renderProject(info, { ...request, mode: 'export' })
+    return renderProject(info, { ...request, mode: 'export' }, (progress: RenderProgress) => {
+      mainWindow?.webContents.send('render.progress', progress)
+    })
   })
 
   ipcMain.handle('dialog.selectExportDir', async (_event, defaultPath?: string) => {

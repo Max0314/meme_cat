@@ -15,6 +15,19 @@ $backgroundTarget = Join-Path $Root "assets\cats\backgrounds"
 $dataDir = Join-Path $Root "data"
 New-Item -ItemType Directory -Force -Path $videoTarget, $backgroundTarget, $dataDir | Out-Null
 
+function Merge-ManagedAssetIndex([string]$IndexPath, [object[]]$Assets, [string[]]$ManagedRoots) {
+  $tempPath = [IO.Path]::GetTempFileName()
+  try {
+    @($Assets) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+    & node (Join-Path $PSScriptRoot "merge-asset-index.mjs") $IndexPath $tempPath "replace-managed-roots" @ManagedRoots
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to merge asset index."
+    }
+  } finally {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Test-IsInsidePath([string]$childPath, [string]$parentPath) {
   if ([string]::IsNullOrWhiteSpace($childPath)) { return $false }
   $fullChild = [IO.Path]::GetFullPath($childPath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
@@ -165,27 +178,7 @@ foreach ($file in $backgroundFiles) {
 }
 
 $indexPath = Join-Path $dataDir "assets.index.json"
-$existing = @()
-if (Test-Path -LiteralPath $indexPath) {
-  $raw = Get-Content -LiteralPath $indexPath -Raw
-  if ($raw.Trim()) {
-    try {
-      $existing = @($raw | ConvertFrom-Json)
-    } catch {
-      Write-Warning "Existing asset index is not valid JSON. It will be rebuilt from this curated import."
-      $existing = @()
-    }
-  }
-}
-
-function Test-IsManagedResourceAsset($asset) {
-  return (Test-IsInsidePath ([string]$asset.localPath) $videoTarget) -or
-    (Test-IsInsidePath ([string]$asset.localPath) $backgroundTarget) -or
-    (Test-IsInsidePath ([string]$asset.sourceUrl) $sourceRoot)
-}
-
-$kept = @($existing | Where-Object { -not (Test-IsManagedResourceAsset $_) })
-@($newAssets + $kept) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $indexPath -Encoding UTF8
+Merge-ManagedAssetIndex -IndexPath $indexPath -Assets @($newAssets) -ManagedRoots @($videoTarget, $backgroundTarget, $sourceRoot)
 
 Write-Host "Imported $($selectedVideos.Count) hot green-screen videos and $($backgroundFiles.Count) backgrounds ($BackgroundsPerFolder per scene folder)."
 Write-Host "Targets:"

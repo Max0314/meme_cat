@@ -299,6 +299,17 @@ export interface RenderResult {
   preset: ExportPreset
 }
 
+export type RenderProgressStage = 'preparing' | 'building-filters' | 'encoding' | 'done' | 'failed'
+
+export interface RenderProgress {
+  mode: RenderRequest['mode']
+  stage: RenderProgressStage
+  message: string
+  percent: number
+  outputPath?: string
+  error?: string
+}
+
 export interface AiScriptRequest {
   topic: string
   templatePrompt: string

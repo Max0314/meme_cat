@@ -88,7 +88,12 @@ export async function loadAssetIndex(info: WorkspaceInfo): Promise<Asset[]> {
     loadBundledAssetIndex(),
     readJson<Asset[]>(assetIndexPath(info), [])
   ])
-  return mergeAssetIndexes(bundledAssets, workspaceAssets).map(withFileUrl)
+  const mergedAssets = mergeAssetIndexes(bundledAssets, workspaceAssets)
+  const reconciled = await reconcileGreenAlphaVariants(info, mergedAssets)
+  if (reconciled.changed) {
+    await saveAssetIndex(info, reconciled.assets)
+  }
+  return reconciled.assets.map(withFileUrl)
 }
 
 export async function saveAssetIndex(info: WorkspaceInfo, assets: Asset[]): Promise<void> {
@@ -163,6 +168,66 @@ function serializeAsset(asset: Asset): Asset {
         }
       : {})
   }
+}
+
+async function reconcileGreenAlphaVariants(
+  info: WorkspaceInfo,
+  assets: Asset[]
+): Promise<{ assets: Asset[]; changed: boolean }> {
+  const outputDir = path.join(info.assetsDir, 'processed', 'green-alpha')
+  const defaultKeying = normalizeGreenKeying()
+  let changed = false
+
+  const nextAssets = await Promise.all(
+    assets.map(async (asset) => {
+      const existingVariants = (asset.processedVariants || []).filter((variant) => {
+        if (variant.kind !== 'green-alpha') return true
+        if (existsSync(variant.localPath)) return true
+        changed = true
+        return false
+      })
+
+      if (!isProcessableGreenAsset(asset) || !existsSync(asset.localPath)) {
+        if (existingVariants.length !== (asset.processedVariants || []).length) {
+          return { ...asset, processedVariants: existingVariants.length ? existingVariants : undefined }
+        }
+        return asset
+      }
+
+      const format: 'png' | 'webm' = asset.type === 'image' ? 'png' : 'webm'
+      const cachePath = path.join(outputDir, `${sanitizeFilename(asset.id)}-green-alpha.${format}`)
+      const hasCacheVariant = existingVariants.some((variant) => variant.kind === 'green-alpha' && path.resolve(variant.localPath) === path.resolve(cachePath))
+      if (!existsSync(cachePath) || hasCacheVariant) {
+        if (existingVariants.length !== (asset.processedVariants || []).length) {
+          return { ...asset, processedVariants: existingVariants.length ? existingVariants : undefined }
+        }
+        return asset
+      }
+
+      const [sourceInfo, cacheInfo] = await Promise.all([stat(asset.localPath), stat(cachePath)])
+      changed = true
+      return {
+        ...asset,
+        processedVariants: [
+          ...existingVariants,
+          {
+            kind: 'green-alpha' as const,
+            format,
+            localPath: cachePath,
+            sourceMtimeMs: sourceInfo.mtimeMs,
+            sourceSize: sourceInfo.size,
+            keying: defaultKeying,
+            createdAt: cacheInfo.mtime.toISOString(),
+            width: asset.width,
+            height: asset.height,
+            duration: asset.duration
+          }
+        ]
+      }
+    })
+  )
+
+  return { assets: nextAssets, changed }
 }
 
 export async function importLocalAsset(info: WorkspaceInfo, filePath: string): Promise<Asset> {

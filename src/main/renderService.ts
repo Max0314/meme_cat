@@ -4,7 +4,19 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import ffmpegStaticPath from 'ffmpeg-static'
-import type { Asset, AssetProcessedVariant, ExportPreset, ProjectFile, RenderRequest, RenderResult, TimelineItem, VisualKeying, VisualTransform, WorkspaceInfo } from '../shared/types'
+import type {
+  Asset,
+  AssetProcessedVariant,
+  ExportPreset,
+  ProjectFile,
+  RenderProgress,
+  RenderRequest,
+  RenderResult,
+  TimelineItem,
+  VisualKeying,
+  VisualTransform,
+  WorkspaceInfo
+} from '../shared/types'
 
 interface VisualSegment {
   inputIndex: number
@@ -25,6 +37,7 @@ interface VisualRenderChunk {
   sourceStartFrame: number
   durationFrames: number
   transform: VisualTransform
+  filters: string[]
 }
 
 interface MediaSize {
@@ -35,7 +48,11 @@ interface MediaSize {
 const audioProbeCache = new Map<string, boolean>()
 const mediaSizeProbeCache = new Map<string, MediaSize | null>()
 
-export async function renderProject(info: WorkspaceInfo, request: RenderRequest): Promise<RenderResult> {
+export async function renderProject(
+  info: WorkspaceInfo,
+  request: RenderRequest,
+  onProgress?: (progress: RenderProgress) => void
+): Promise<RenderResult> {
   const ffmpegPath = resolveFfmpegPath()
   const preset = request.mode === 'preview' ? previewPreset(request.preset) : request.preset
   const now = new Date()
@@ -43,17 +60,33 @@ export async function renderProject(info: WorkspaceInfo, request: RenderRequest)
   const outputDir = request.mode === 'export' ? request.outputDir || info.outputDir : info.outputDir
   const outputPath = request.mode === 'export' && request.outputPath ? request.outputPath : path.join(outputDir, `${baseName}.mp4`)
   const tempDir = path.join(info.dataDir, 'render-temp')
+  const totalSeconds = projectDurationSeconds(request.project, preset.fps)
+  const emit = (progress: Omit<RenderProgress, 'mode'>): void => {
+    onProgress?.({ mode: request.mode, ...progress })
+  }
+
+  emit({ stage: 'preparing', message: '准备渲染工作区', percent: 0.05, outputPath })
   await mkdir(tempDir, { recursive: true })
   await mkdir(path.dirname(outputPath), { recursive: true })
 
   const assPath = path.join(tempDir, `${baseName}.ass`)
+  emit({ stage: 'building-filters', message: '组装视频图层和字幕滤镜', percent: 0.18, outputPath })
   const args = await buildFfmpegArgs(request.project, preset, outputPath, assPath, ffmpegPath)
-  await runFfmpeg(ffmpegPath, args)
+  emit({ stage: 'encoding', message: 'FFmpeg 正在编码 MP4', percent: 0.28, outputPath })
+  try {
+    await runFfmpeg(ffmpegPath, args, totalSeconds, (percent) => {
+      emit({ stage: 'encoding', message: 'FFmpeg 正在编码 MP4', percent, outputPath })
+    })
+  } catch (error) {
+    emit({ stage: 'failed', message: '渲染失败', percent: 1, outputPath, error: error instanceof Error ? error.message : String(error) })
+    throw error
+  }
 
+  emit({ stage: 'done', message: '渲染完成', percent: 1, outputPath })
   return {
     outputPath,
     fileUrl: pathToFileURL(outputPath).toString(),
-    durationSeconds: projectDurationSeconds(request.project, preset.fps),
+    durationSeconds: totalSeconds,
     preset
   }
 }
@@ -186,7 +219,7 @@ async function buildFilterComplex(
 
   let overlayIndex = 0
   visualSegments.forEach((segment, segmentIndex) => {
-    const chunks = visualRenderChunks(segment.item, preset.fps)
+    const chunks = visualRenderChunks(segment.item, preset)
     const sourceLabels = chunks.length > 1 ? chunks.map((_, chunkIndex) => `seg${segmentIndex}s${chunkIndex}`) : [`${segment.inputIndex}:v`]
     if (chunks.length > 1) {
       filters.push(`[${segment.inputIndex}:v]split=${chunks.length}${sourceLabels.map((label) => `[${label}]`).join('')}`)
@@ -211,7 +244,7 @@ async function buildFilterComplex(
 
       filters.push(
         `[${sourceLabel}]` +
-          buildVisualLayerFilters(segment.item, preset, scaledWidth, scaledHeight, chunkDurationSeconds, startSeconds, opacity, fitCanvas, chunk.transform, sourceStartSeconds, Boolean(segment.alphaVariant)).join(',') +
+          buildVisualLayerFilters(segment.item, preset, scaledWidth, scaledHeight, chunkDurationSeconds, startSeconds, opacity, fitCanvas, chunk.transform, sourceStartSeconds, Boolean(segment.alphaVariant), chunk.filters).join(',') +
           `[${overlayLabel}]`
       )
       filters.push(
@@ -306,16 +339,38 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
     const style = normalizeSubtitleStyle({ ...baseStyle, ...item.style })
     const lines: string[] = []
     if (item.speakerVisible && item.speakerName?.trim()) {
-      lines.push(`Dialogue: 1,${start},${end},${speakerStyleName(item.speakerPosition || style.position)},,0,0,0,,${escapeAssText(item.speakerName.trim())}`)
+      lines.push(
+        `Dialogue: 1,${start},${end},${speakerStyleName(item.speakerPosition || style.position)},,0,0,0,,${assTransformOverride(
+          item,
+          'speaker',
+          item.speakerPosition || style.position,
+          preset
+        )}${escapeAssText(item.speakerName.trim())}`
+      )
     }
     const text = escapeAssText(item.text || '')
     if (text) {
-      lines.push(`Dialogue: 2,${start},${end},${subtitleStyleName(style.position)},,0,0,0,,${text}`)
+      lines.push(`Dialogue: 2,${start},${end},${subtitleStyleName(style.position)},,0,0,0,,${assTransformOverride(item, 'subtitle', style.position, preset)}${text}`)
     }
     return lines
   })
 
   return [...header, ...events, ''].join('\n')
+}
+
+function assTransformOverride(
+  item: TimelineItem,
+  kind: 'speaker' | 'subtitle',
+  position: ProjectFile['subtitleStyle']['position'],
+  preset: ExportPreset
+): string {
+  if (!item.transform) return ''
+  const transform = normalizeTransform(item.transform)
+  const x = Math.round(preset.width / 2 + transform.x)
+  const y = Math.round(preset.height * ((kind === 'speaker' ? speakerPositionPercent(position) : subtitlePositionPercent(position)) / 100) + transform.y)
+  const scale = Math.round(transform.scale * 100)
+  const rotation = Math.round(transform.rotation)
+  return `{\\pos(${x},${y})\\frz${rotation}\\fscx${scale}\\fscy${scale}}`
 }
 
 function subtitleStyleRows(style: ProjectFile['subtitleStyle'], preset: ExportPreset): string[] {
@@ -334,6 +389,18 @@ function subtitleStyleRows(style: ProjectFile['subtitleStyle'], preset: ExportPr
       `Style: ${speakerStyleName(position)},${fontName},${speakerSize},&H0033E9FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,0,${alignment},60,60,${speakerMarginV},1`
     ]
   })
+}
+
+function subtitlePositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
+  if (position === 'top') return 30
+  if (position === 'middle') return 50
+  return 91
+}
+
+function speakerPositionPercent(position: ProjectFile['subtitleStyle']['position']): number {
+  if (position === 'top') return 6
+  if (position === 'middle') return 38
+  return 96
 }
 
 function assFontName(fontFamily: string): string {
@@ -372,15 +439,28 @@ function resolveFfmpegPath(): string {
   return ffmpegStaticPath.replace('app.asar', 'app.asar.unpacked')
 }
 
-function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
+function runFfmpeg(
+  ffmpegPath: string,
+  args: string[],
+  totalSeconds: number,
+  onProgress?: (percent: number) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })
     let stderr = ''
+    let lastProgressAt = 0
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
+      const text = chunk.toString()
+      stderr += text
+      const percent = ffmpegProgressPercent(text, totalSeconds)
+      const now = Date.now()
+      if (typeof percent === 'number' && now - lastProgressAt > 300) {
+        lastProgressAt = now
+        onProgress?.(percent)
+      }
     })
     child.on('error', reject)
     child.on('close', (code) => {
@@ -391,6 +471,15 @@ function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
       }
     })
   })
+}
+
+function ffmpegProgressPercent(text: string, totalSeconds: number): number | undefined {
+  const matches = Array.from(text.matchAll(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g))
+  const match = matches[matches.length - 1]
+  if (!match || totalSeconds <= 0) return undefined
+  const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])
+  if (!Number.isFinite(seconds)) return undefined
+  return clamp(0.28 + (seconds / totalSeconds) * 0.67, 0.28, 0.95)
 }
 
 function hasAudioStream(ffmpegPath: string, filePath: string): Promise<boolean> {
@@ -464,26 +553,36 @@ function normalizeTransform(transform?: Partial<VisualTransform>): VisualTransfo
   }
 }
 
-function visualRenderChunks(item: TimelineItem, fps: number): VisualRenderChunk[] {
+function visualRenderChunks(item: TimelineItem, preset: ExportPreset): VisualRenderChunk[] {
   const keyframes = normalizeVisualKeyframes(item)
-  if (!keyframes.length) {
-    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: normalizeTransform(item.transform) }]
+  const animatedEffects = hasAnimatedTimelineEffects(item)
+  if (!keyframes.length && !animatedEffects) {
+    const effectState = applyTimelineEffects(item, normalizeTransform(item.transform), 0, preset)
+    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
   }
 
-  if (keyframes.length === 1) {
-    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: transformFromKeyframe(item, keyframes[0]) }]
+  if (keyframes.length === 1 && !animatedEffects) {
+    const effectState = applyTimelineEffects(item, transformFromKeyframe(item, keyframes[0]), 0, preset)
+    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
   }
 
   const chunks: VisualRenderChunk[] = []
-  const stepFrames = item.durationFrames > fps * 20 ? Math.max(2, Math.round(fps / 8)) : 2
+  const stepFrames = item.durationFrames > preset.fps * 20 ? Math.max(2, Math.round(preset.fps / 8)) : 2
   for (let frame = 0; frame < item.durationFrames; frame += stepFrames) {
+    const baseTransform = visualTransformAtLocalFrame(item, frame, keyframes)
+    const effectState = applyTimelineEffects(item, baseTransform, frame, preset)
     chunks.push({
       sourceStartFrame: frame,
       durationFrames: Math.min(stepFrames, item.durationFrames - frame),
-      transform: visualTransformAtLocalFrame(item, frame, keyframes)
+      transform: effectState.transform,
+      filters: effectState.filters
     })
   }
   return chunks
+}
+
+function hasAnimatedTimelineEffects(item: TimelineItem): boolean {
+  return item.effects.some((effect) => effect.type !== 'none' && effect.intensity > 0)
 }
 
 function normalizeVisualKeyframes(item: TimelineItem): NonNullable<TimelineItem['keyframes']> {
@@ -556,6 +655,46 @@ function transformFromKeyframe(item: TimelineItem, keyframe: NonNullable<Timelin
   }
 }
 
+function applyTimelineEffects(
+  item: TimelineItem,
+  transform: VisualTransform,
+  localFrame: number,
+  preset: ExportPreset
+): { transform: VisualTransform; filters: string[] } {
+  const durationFrames = Math.max(1, item.durationFrames)
+  const progress = clamp(localFrame / durationFrames, 0, 1)
+  let nextTransform = { ...transform }
+  const filters: string[] = []
+
+  item.effects.forEach((effect) => {
+    const intensity = clamp(effect.intensity, 0, 1)
+    if (effect.type === 'zoom-in') {
+      nextTransform = { ...nextTransform, scale: clamp(nextTransform.scale * (1 + intensity * progress), 0.08, 4) }
+    } else if (effect.type === 'zoom-out') {
+      nextTransform = { ...nextTransform, scale: clamp(nextTransform.scale * (1 + intensity * (1 - progress)), 0.08, 4) }
+    } else if (effect.type === 'pan-left') {
+      nextTransform = { ...nextTransform, x: nextTransform.x + Math.round(preset.width * intensity * (0.5 - progress) * 0.5) }
+    } else if (effect.type === 'pan-right') {
+      nextTransform = { ...nextTransform, x: nextTransform.x + Math.round(preset.width * intensity * (progress - 0.5) * 0.5) }
+    } else if (effect.type === 'shake') {
+      const wave = localFrame * 2.35
+      nextTransform = {
+        ...nextTransform,
+        x: nextTransform.x + Math.round(Math.sin(wave) * preset.width * intensity * 0.018),
+        y: nextTransform.y + Math.round(Math.cos(wave * 1.17) * preset.height * intensity * 0.012),
+        rotation: nextTransform.rotation + Math.sin(wave * 0.77) * intensity * 5
+      }
+    } else if (effect.type === 'flash') {
+      const pulse = Math.max(0, Math.sin(progress * Math.PI))
+      if (pulse > 0.001) {
+        filters.push(`eq=brightness=${(pulse * intensity * 0.55).toFixed(3)}:saturation=${(1 + pulse * intensity * 0.25).toFixed(3)}`)
+      }
+    }
+  })
+
+  return { transform: nextTransform, filters }
+}
+
 function lerp(from: number, to: number, ratio: number): number {
   return from + (to - from) * clamp(ratio, 0, 1)
 }
@@ -599,7 +738,8 @@ function buildVisualLayerFilters(
   fitCanvas: boolean,
   transformOverride?: VisualTransform,
   sourceStartSeconds = 0,
-  skipKeying = false
+  skipKeying = false,
+  effectFilters: string[] = []
 ): string[] {
   const keying = normalizeKeying(item.keying)
   const transform = transformOverride || normalizeTransform(item.transform)
@@ -628,6 +768,8 @@ function buildVisualLayerFilters(
   if (keying.enabled && !skipKeying) {
     filters.push(`chromakey=${keying.color}:${keying.similarity.toFixed(3)}:${keying.blend.toFixed(3)}`)
   }
+
+  filters.push(...effectFilters)
 
   filters.push(
     `trim=start=${sourceStartSeconds.toFixed(3)}:duration=${durationSeconds.toFixed(3)}`,
