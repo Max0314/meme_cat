@@ -1,4 +1,5 @@
-import type { Asset, AssetSearchRequest, TimelineItem, TrackGroupId, TrackKind } from '../../shared/types'
+import type { Asset, AssetSearchRequest, TimelineItem, TrackGroupId, TrackKind, VisibleBounds } from '../../shared/types'
+export type { VisibleBounds } from '../../shared/types'
 
 export type AssetPrimaryCategory = 'all' | 'background' | 'character' | 'green-screen' | 'audio' | 'props' | 'sticker'
 export type AssetSortMode = 'recent' | 'name' | 'duration' | 'type' | 'usage'
@@ -40,13 +41,6 @@ export type RightTab = 'templates' | 'roles' | 'script' | 'export' | 'settings'
 export type SubtitleSyncMode = 'replace' | 'from-playhead' | 'append'
 export type SubtitleTimingMode = 'auto' | 'fixed' | 'even'
 export type SubtitleStyleScope = 'all' | 'selected' | 'future'
-
-export interface VisibleBounds {
-  left: number
-  top: number
-  width: number
-  height: number
-}
 
 export interface TimelineContextMenu {
   itemId: string

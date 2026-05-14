@@ -44,6 +44,18 @@ interface VisualRenderChunk {
   durationFrames: number
   transform: VisualTransform
   filters: string[]
+  roleLabelVisible?: boolean
+}
+
+type RenderSubtitleItem = TimelineItem & {
+  subtitleStreamId?: string
+  subtitleCueOrder?: number
+}
+
+interface SubtitleAssChunk {
+  startFrame: number
+  durationFrames: number
+  override: string
 }
 
 interface MediaSize {
@@ -120,6 +132,7 @@ async function buildFfmpegArgs(
   const timelineOrder = new Map(project.timeline.map((item, index) => [item.id, index]))
   const enabledTracks = new Set(project.tracks.filter((track) => !track.muted).map((track) => track.id))
   const visualItems = project.timeline
+    .flatMap((item) => expandRoleInstanceForRender(item))
     .filter((item) => item.type === 'visual' && enabledTracks.has(item.trackId) && item.assetId && item.durationFrames > 0)
     .sort((a, b) => (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) || (timelineOrder.get(a.id) ?? 0) - (timelineOrder.get(b.id) ?? 0))
   const audioItems = project.timeline
@@ -217,6 +230,8 @@ async function buildFfmpegArgs(
     'yuv420p',
     '-movflags',
     '+faststart',
+    '-t',
+    totalSeconds.toFixed(3),
     '-y',
     outputPath
   )
@@ -293,7 +308,7 @@ async function buildFilterComplex(
   const subtitleItems = buildSubtitleItems(project, preset.fps)
   const hasRoleLabels = visualSegments.some((segment) => {
     const label = roleLabelForItem(segment.item)
-    return label.visible && Boolean(label.text.trim())
+    return Boolean(label.text.trim()) && visualRenderChunks(segment.item, preset).some((chunk) => chunk.roleLabelVisible ?? label.visible)
   })
   if (subtitleItems.length || hasRoleLabels) {
     await writeFile(assPath, makeAssFile(project, preset, subtitleItems, visualSegments), 'utf-8')
@@ -331,9 +346,114 @@ async function buildFilterComplex(
   return filters.join(';')
 }
 
-function buildSubtitleItems(project: ProjectFile, fps: number): TimelineItem[] {
+function expandSubtitleStreamForRender(item: TimelineItem): RenderSubtitleItem[] {
+  if (item.type !== 'subtitle' || !Array.isArray(item.subtitleCues)) return [item]
+  return item.subtitleCues
+    .filter((cue) => cue.durationFrames > 0 && cue.text?.trim())
+    .map((cue, index) => {
+      const cueStart = Math.max(0, Math.round(cue.startFrame))
+      const cueDuration = Math.max(1, Math.round(cue.durationFrames))
+      const startState = visualAnimationStateAtFrame(item, cueStart)
+      const shiftedKeyframes: NonNullable<TimelineItem['keyframes']> = [
+        {
+          id: `${item.id}:${cue.id}:kf0`,
+          frame: 0,
+          x: Math.round(startState.transform.x),
+          y: Math.round(startState.transform.y),
+          scale: Number(startState.transform.scale.toFixed(3)),
+          rotation: Math.round(startState.transform.rotation),
+          opacity: Number(startState.transform.opacity.toFixed(3)),
+          ...(typeof startState.effectIntensity === 'number' ? { effectIntensity: Number(startState.effectIntensity.toFixed(3)) } : {})
+        },
+        ...getVisualKeyframes(item)
+          .filter((keyframe) => keyframe.frame > cueStart && keyframe.frame < cueStart + cueDuration)
+          .map((keyframe) => ({ ...keyframe, id: `${item.id}:${cue.id}:${keyframe.id}`, frame: keyframe.frame - cueStart }))
+      ]
+      return {
+        ...item,
+        id: `${item.id}:${cue.id}`,
+        subtitleStreamId: item.id,
+        subtitleCueOrder: index,
+        label: cue.text || item.label,
+        startFrame: item.startFrame + cueStart,
+        durationFrames: cueDuration,
+        sourceInFrame: 0,
+        text: cue.text,
+        transform: startState.transform,
+        keyframes: shiftedKeyframes,
+        subtitleCues: undefined
+      }
+    })
+}
+
+function expandRoleInstanceForRender(item: TimelineItem): TimelineItem[] {
+  if (item.type !== 'visual' || !Array.isArray(item.roleStates)) return [item]
+  return item.roleStates
+    .filter((state) => state.assetId && state.durationFrames > 0)
+    .map((state) => {
+      const stateStart = Math.max(0, Math.round(state.startFrame))
+      const stateDuration = Math.max(1, Math.round(state.durationFrames))
+      const startState = visualAnimationStateAtFrame(item, stateStart)
+      const renderedStartTransform = applyRoleStateRenderTransform(startState.transform, state)
+      const shiftedKeyframes: NonNullable<TimelineItem['keyframes']> = [
+        {
+          id: `${item.id}:${state.id}:kf0`,
+          frame: 0,
+          x: Math.round(renderedStartTransform.x),
+          y: Math.round(renderedStartTransform.y),
+          scale: Number(renderedStartTransform.scale.toFixed(3)),
+          rotation: Math.round(renderedStartTransform.rotation),
+          opacity: Number(renderedStartTransform.opacity.toFixed(3)),
+          roleLabelVisible: startState.roleLabelVisible,
+          ...(typeof startState.effectIntensity === 'number' ? { effectIntensity: Number(startState.effectIntensity.toFixed(3)) } : {})
+        },
+        ...getVisualKeyframes(item)
+          .filter((keyframe) => keyframe.frame > stateStart && keyframe.frame < stateStart + stateDuration)
+          .map((keyframe) => {
+            const transformed = applyRoleStateRenderTransform(transformFromKeyframe(item, keyframe), state)
+            return {
+              ...keyframe,
+              id: `${item.id}:${state.id}:${keyframe.id}`,
+              frame: keyframe.frame - stateStart,
+              x: transformed.x,
+              y: transformed.y,
+              scale: transformed.scale,
+              rotation: transformed.rotation,
+              opacity: transformed.opacity
+            }
+          })
+      ]
+      return {
+        ...item,
+        id: `${item.id}:${state.id}`,
+        assetId: state.assetId,
+        label: state.label || item.label,
+        startFrame: item.startFrame + stateStart,
+        durationFrames: stateDuration,
+        sourceInFrame: Math.max(0, Math.round(state.sourceInFrame || 0)),
+        playbackRate: state.playbackRate ?? item.playbackRate,
+        volume: state.muted ? 0 : (item.volume ?? 1) * (state.volume ?? 1),
+        keying: state.keying ?? item.keying,
+        transform: renderedStartTransform,
+        keyframes: shiftedKeyframes,
+        roleStates: undefined
+      }
+    })
+}
+
+function applyRoleStateRenderTransform(transform: VisualTransform, state: NonNullable<TimelineItem['roleStates']>[number]): VisualTransform {
+  return {
+    ...transform,
+    x: transform.x + Math.round(state.offsetX || 0),
+    y: transform.y + Math.round(state.offsetY || 0),
+    scale: clamp(transform.scale * (state.scale ?? 1), 0.08, 4)
+  }
+}
+
+function buildSubtitleItems(project: ProjectFile, fps: number): RenderSubtitleItem[] {
   const enabledTracks = new Set(project.tracks.filter((track) => !track.muted).map((track) => track.id))
   const explicit = project.timeline
+    .flatMap((item) => expandSubtitleStreamForRender(item))
     .filter((item) => item.type === 'subtitle' && enabledTracks.has(item.trackId) && (item.text || item.speakerName) && item.durationFrames > 0)
     .sort((a, b) => a.startFrame - b.startFrame)
   if (explicit.length) return explicit
@@ -359,7 +479,7 @@ function buildSubtitleItems(project: ProjectFile, fps: number): TimelineItem[] {
   }))
 }
 
-function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: TimelineItem[], visualSegments: VisualSegment[]): string {
+function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: RenderSubtitleItem[], visualSegments: VisualSegment[]): string {
   const baseStyle = normalizeSubtitleStyle(project.subtitleStyle)
 
   const header = [
@@ -392,9 +512,10 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
         )}${escapeAssText(item.speakerName.trim())}`
       )
     }
-    const text = escapeAssText(item.text || '')
-    if (text) {
-      lines.push(`Dialogue: 2,${start},${end},${subtitleStyleName(style.position)},,0,0,0,,${assTransformOverride(item, 'subtitle', style.position, preset)}${text}`)
+    const rawText = item.text || ''
+    if (rawText.trim()) {
+      const text = escapeAssText(wrapSubtitleText(rawText, style, item.subtitleBox, preset))
+      lines.push(...buildSubtitleTextAssEvents(item, subtitleItems, visualSegments, style, preset, text))
     }
     return lines
   })
@@ -403,11 +524,143 @@ function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: 
   return [...header, ...roleLabelEvents, ...subtitleEvents, ''].join('\n')
 }
 
+function buildSubtitleTextAssEvents(
+  item: RenderSubtitleItem,
+  allSubtitleItems: RenderSubtitleItem[],
+  visualSegments: VisualSegment[],
+  style: ProjectFile['subtitleStyle'],
+  preset: ExportPreset,
+  escapedText: string
+): string[] {
+  return subtitleAssChunks(item, allSubtitleItems, visualSegments, style, preset).map((chunk) => {
+    const start = framesToAssTime(chunk.startFrame, preset.fps)
+    const end = framesToAssTime(chunk.startFrame + chunk.durationFrames, preset.fps)
+    return `Dialogue: 2,${start},${end},${subtitleStyleName(style.position)},,0,0,0,,${chunk.override}${escapedText}`
+  })
+}
+
+function subtitleAssChunks(
+  item: RenderSubtitleItem,
+  allSubtitleItems: RenderSubtitleItem[],
+  visualSegments: VisualSegment[],
+  style: ProjectFile['subtitleStyle'],
+  preset: ExportPreset
+): SubtitleAssChunk[] {
+  const animated = Boolean(item.subtitleBinding?.roleId) || getVisualKeyframes(item).length > 0 || hasAnimatedTimelineEffects(item)
+  if (!animated) {
+    const override = subtitleAssOverrideAtFrame(item, allSubtitleItems, visualSegments, style, preset, 0)
+    return override ? [{ startFrame: item.startFrame, durationFrames: item.durationFrames, override }] : []
+  }
+
+  const chunks: SubtitleAssChunk[] = []
+  for (let localFrame = 0; localFrame < item.durationFrames; localFrame += 1) {
+    const override = subtitleAssOverrideAtFrame(item, allSubtitleItems, visualSegments, style, preset, localFrame)
+    if (!override) continue
+    const absoluteFrame = item.startFrame + localFrame
+    const previous = chunks[chunks.length - 1]
+    if (previous && previous.startFrame + previous.durationFrames === absoluteFrame && previous.override === override) {
+      previous.durationFrames += 1
+    } else {
+      chunks.push({ startFrame: absoluteFrame, durationFrames: 1, override })
+    }
+  }
+  return chunks
+}
+
+function subtitleAssOverrideAtFrame(
+  item: RenderSubtitleItem,
+  allSubtitleItems: RenderSubtitleItem[],
+  visualSegments: VisualSegment[],
+  style: ProjectFile['subtitleStyle'],
+  preset: ExportPreset,
+  localFrame: number
+): string | null {
+  const animationState = visualAnimationStateAtFrame(item, localFrame)
+  const effectState = applyTimelineEffects(item, animationState.transform, localFrame, preset, animationState.effectIntensity)
+  const transform = effectState.transform
+  const absoluteFrame = item.startFrame + localFrame
+  const stackOffset = subtitleStackIndex(item, allSubtitleItems, absoluteFrame) * Math.max(18, Math.round(style.fontSize * 1.12))
+  const binding = item.subtitleBinding?.roleId ? item.subtitleBinding : undefined
+
+  if (binding?.roleId) {
+    const roleSegment = findRoleSegmentAtFrame(visualSegments, binding.roleId, absoluteFrame)
+    if (!roleSegment) return null
+    const roleLocalFrame = absoluteFrame - roleSegment.item.startFrame
+    const roleAnimation = visualAnimationStateAtFrame(roleSegment.item, roleLocalFrame)
+    const roleEffect = applyTimelineEffects(roleSegment.item, roleAnimation.transform, roleLocalFrame, preset, roleAnimation.effectIntensity)
+    const anchor = roleAnchorForSegment(roleSegment, roleEffect.transform, style.position, style.fontSize, preset)
+    return assComputedTextOverride({
+      x: anchor.x + transform.x,
+      y: anchor.y + transform.y + stackOffset,
+      rotation: anchor.rotation + transform.rotation,
+      scale: transform.scale,
+      opacity: anchor.opacity * transform.opacity
+    })
+  }
+
+  return assComputedTextOverride({
+    x: preset.width / 2 + transform.x,
+    y: preset.height * (subtitlePositionPercent(style.position) / 100) + transform.y + stackOffset,
+    rotation: transform.rotation,
+    scale: transform.scale,
+    opacity: transform.opacity
+  })
+}
+
+function subtitleStackIndex(item: RenderSubtitleItem, allSubtitleItems: RenderSubtitleItem[], absoluteFrame: number): number {
+  const streamId = item.subtitleStreamId || item.id
+  const active = allSubtitleItems
+    .filter((entry) => (entry.subtitleStreamId || entry.id) === streamId)
+    .filter((entry) => absoluteFrame >= entry.startFrame && absoluteFrame < entry.startFrame + entry.durationFrames)
+    .sort((a, b) => a.startFrame - b.startFrame || (a.subtitleCueOrder ?? 0) - (b.subtitleCueOrder ?? 0))
+  return Math.max(0, active.findIndex((entry) => entry.id === item.id))
+}
+
+function findRoleSegmentAtFrame(visualSegments: VisualSegment[], roleId: string, absoluteFrame: number): VisualSegment | undefined {
+  return visualSegments
+    .filter((segment) => segment.item.roleId === roleId && absoluteFrame >= segment.item.startFrame && absoluteFrame < segment.item.startFrame + segment.item.durationFrames)
+    .sort((a, b) => a.item.startFrame - b.item.startFrame)
+    .slice(-1)[0]
+}
+
+function roleAnchorForSegment(
+  segment: VisualSegment,
+  transform: VisualTransform,
+  position: ProjectFile['subtitleStyle']['position'],
+  fontSize: number,
+  preset: ExportPreset
+): { x: number; y: number; rotation: number; opacity: number } {
+  const fitCanvas = !isBackgroundVisualSegment(segment)
+  const width = Math.max(2, Math.round(preset.width * transform.scale))
+  const height = Math.max(2, Math.round(fitCanvas ? width / mediaAspectRatio(segment.asset, segment.mediaSize) : preset.height * transform.scale))
+  const padding = Math.max(6, Math.round(fontSize * 0.16))
+  const bounds = normalizeVisibleBounds(segment.alphaVariant?.visibleBounds)
+  const layerLeft = preset.width / 2 + transform.x - width / 2
+  const layerTop = preset.height / 2 + transform.y - height / 2
+  const x = Math.round(layerLeft + (bounds.left + bounds.width / 2) * width)
+  const visibleTop = layerTop + bounds.top * height
+  const visibleMiddle = layerTop + (bounds.top + bounds.height / 2) * height
+  const visibleBottom = layerTop + (bounds.top + bounds.height) * height
+  const y =
+    position === 'top'
+      ? Math.round(visibleTop - padding)
+      : position === 'middle'
+        ? Math.round(visibleMiddle)
+        : Math.round(visibleBottom + padding)
+  return { x, y, rotation: transform.rotation, opacity: transform.opacity }
+}
+
+function assComputedTextOverride(transform: { x: number; y: number; rotation: number; scale: number; opacity: number }): string {
+  const scale = Math.round(transform.scale * 100)
+  const alpha = Math.round((1 - clamp(transform.opacity, 0, 1)) * 255).toString(16).padStart(2, '0').toUpperCase()
+  return `{\\an5\\pos(${Math.round(transform.x)},${Math.round(transform.y)})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\alpha&H${alpha}&}`
+}
+
 function buildRoleLabelAssEvents(visualSegments: VisualSegment[], preset: ExportPreset): string[] {
   return visualSegments.flatMap((segment) => {
     const label = roleLabelForItem(segment.item)
-    if (!label.visible || !label.text.trim()) return []
-    return visualRenderChunks(segment.item, preset).map((chunk) => {
+    if (!label.text.trim()) return []
+    return visualRenderChunks(segment.item, preset).filter((chunk) => chunk.roleLabelVisible ?? label.visible).map((chunk) => {
       const startFrame = segment.item.startFrame + chunk.sourceStartFrame
       const endFrame = startFrame + chunk.durationFrames
       return `Dialogue: 1,${framesToAssTime(startFrame, preset.fps)},${framesToAssTime(endFrame, preset.fps)},${speakerStyleName(
@@ -427,14 +680,19 @@ function roleLabelAssOverride(
   const width = Math.max(2, Math.round(preset.width * transform.scale))
   const height = Math.max(2, Math.round(fitCanvas ? width / mediaAspectRatio(segment.asset, segment.mediaSize) : preset.height * transform.scale))
   const padding = Math.max(6, Math.round(style.fontSize * 0.16))
-  const x = Math.round(preset.width / 2 + transform.x)
-  const baseY = preset.height / 2 + transform.y
+  const bounds = normalizeVisibleBounds(segment.alphaVariant?.visibleBounds)
+  const layerLeft = preset.width / 2 + transform.x - width / 2
+  const layerTop = preset.height / 2 + transform.y - height / 2
+  const x = Math.round(layerLeft + (bounds.left + bounds.width / 2) * width)
+  const visibleTop = layerTop + bounds.top * height
+  const visibleMiddle = layerTop + (bounds.top + bounds.height / 2) * height
+  const visibleBottom = layerTop + (bounds.top + bounds.height) * height
   const y =
     style.position === 'top'
-      ? Math.round(baseY - height / 2 - padding)
+      ? Math.round(visibleTop - padding)
       : style.position === 'middle'
-        ? Math.round(baseY)
-        : Math.round(baseY + height / 2 + padding)
+        ? Math.round(visibleMiddle)
+        : Math.round(visibleBottom + padding)
   const scale = Math.round(transform.scale * 100)
   const alpha = Math.round((1 - clamp(transform.opacity, 0, 1)) * 255).toString(16).padStart(2, '0').toUpperCase()
   return `{\\an5\\pos(${x},${y})\\frz${Math.round(transform.rotation)}\\fscx${scale}\\fscy${scale}\\alpha&H${alpha}&\\fn${assFontName(
@@ -504,6 +762,40 @@ function normalizeSubtitleStyle(style?: Partial<ProjectFile['subtitleStyle']>): 
   }
 }
 
+function normalizeSubtitleBox(box?: TimelineItem['subtitleBox']): Required<NonNullable<TimelineItem['subtitleBox']>> {
+  const autoHeight = box?.autoHeight ?? true
+  return {
+    widthPct: clamp(box?.widthPct ?? 78, 18, 96),
+    heightPct: autoHeight ? 18 : clamp(box?.heightPct ?? 18, 6, 92),
+    autoHeight,
+    padding: clamp(Math.round(box?.padding ?? 0), 0, 80),
+    lineHeight: clamp(Number(box?.lineHeight ?? 1.12), 0.8, 2),
+    textAlign: box?.textAlign || 'center',
+    verticalAlign: box?.verticalAlign || 'middle',
+    overflow: box?.overflow || 'wrap'
+  }
+}
+
+function wrapSubtitleText(text: string, style: ProjectFile['subtitleStyle'], box: TimelineItem['subtitleBox'], preset: ExportPreset): string {
+  const normalizedBox = normalizeSubtitleBox(box)
+  if (normalizedBox.overflow === 'clip') return text
+  const maxWidth = Math.max(80, preset.width * (normalizedBox.widthPct / 100) - normalizedBox.padding * 2)
+  const approxCharWidth = Math.max(8, style.fontSize * 0.56)
+  const maxChars = Math.max(2, Math.floor(maxWidth / approxCharWidth))
+  return text
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const chars = Array.from(line)
+      if (chars.length <= maxChars) return [line]
+      const rows: string[] = []
+      for (let index = 0; index < chars.length; index += maxChars) {
+        rows.push(chars.slice(index, index + maxChars).join(''))
+      }
+      return rows
+    })
+    .join('\n')
+}
+
 function normalizeRoleLabelStyle(style?: Partial<ProjectFile['subtitleStyle']>): ProjectFile['subtitleStyle'] {
   return normalizeSubtitleStyle({ ...DEFAULT_ROLE_LABEL_STYLE, ...style })
 }
@@ -526,6 +818,19 @@ function speakerStyleName(position: string): string {
   if (position === 'top') return 'NameTop'
   if (position === 'middle') return 'NameMiddle'
   return 'NameBottom'
+}
+
+function normalizeVisibleBounds(bounds?: AssetProcessedVariant['visibleBounds']): { left: number; top: number; width: number; height: number } {
+  const left = clamp(bounds?.left ?? 0, 0, 1)
+  const top = clamp(bounds?.top ?? 0, 0, 1)
+  const width = clamp(bounds?.width ?? 1, 0.02, 1)
+  const height = clamp(bounds?.height ?? 1, 0.02, 1)
+  return {
+    left,
+    top,
+    width: Math.min(width, 1 - left),
+    height: Math.min(height, 1 - top)
+  }
 }
 
 function resolveFfmpegPath(): string {
@@ -629,16 +934,12 @@ function probeMediaSize(ffmpegPath: string, filePath: string): Promise<MediaSize
   })
 }
 
-function projectContentEndFrame(project: ProjectFile): number {
-  return project.timeline.reduce((max, item) => Math.max(max, item.startFrame + item.durationFrames), 0)
-}
-
 function projectDurationFrames(project: ProjectFile, fps: number): number {
   const configuredFrames =
     typeof project.durationSeconds === 'number' && Number.isFinite(project.durationSeconds)
       ? Math.round(project.durationSeconds * fps)
-      : fps * 10
-  return Math.max(projectContentEndFrame(project), configuredFrames, fps * 4)
+      : fps * 30
+  return Math.max(configuredFrames, fps)
 }
 
 function projectDurationSeconds(project: ProjectFile, fps: number): number {
@@ -655,13 +956,13 @@ function visualRenderChunks(item: TimelineItem, preset: ExportPreset): VisualRen
   if (!keyframes.length && !animatedEffects) {
     const animationState = visualAnimationStateAtFrame(item, 0)
     const effectState = applyTimelineEffects(item, animationState.transform, 0, preset, animationState.effectIntensity)
-    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
+    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters, roleLabelVisible: animationState.roleLabelVisible }]
   }
 
   if (keyframes.length === 1 && keyframes[0].frame === 0 && !animatedEffects) {
     const animationState = visualAnimationStateAtFrame(item, 0)
     const effectState = applyTimelineEffects(item, animationState.transform, 0, preset, animationState.effectIntensity)
-    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters }]
+    return [{ sourceStartFrame: 0, durationFrames: item.durationFrames, transform: effectState.transform, filters: effectState.filters, roleLabelVisible: animationState.roleLabelVisible }]
   }
 
   const chunks: VisualRenderChunk[] = []
@@ -674,7 +975,8 @@ function visualRenderChunks(item: TimelineItem, preset: ExportPreset): VisualRen
       sourceStartFrame: frame,
       durationFrames: Math.min(stepFrames, item.durationFrames - frame),
       transform: effectState.transform,
-      filters: effectState.filters
+      filters: effectState.filters,
+      roleLabelVisible: animationState.roleLabelVisible
     })
   }
   return chunks

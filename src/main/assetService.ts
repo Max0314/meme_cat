@@ -311,6 +311,7 @@ export async function preprocessGreenScreenAssets(
       const format: 'png' | 'webm' = asset.type === 'image' ? 'png' : 'webm'
       const outputPath = path.join(outputDir, `${sanitizeFilename(asset.id)}-green-alpha.${format}`)
       await runGreenScreenFfmpeg(ffmpegPath, asset.localPath, outputPath, format, keying)
+      const visibleBounds = await probeAlphaVisibleBounds(ffmpegPath, outputPath, asset.width, asset.height).catch(() => undefined)
 
       const variant = {
         kind: 'green-alpha' as const,
@@ -322,7 +323,8 @@ export async function preprocessGreenScreenAssets(
         createdAt: new Date().toISOString(),
         width: asset.width,
         height: asset.height,
-        duration: asset.duration
+        duration: asset.duration,
+        visibleBounds
       }
       asset.processedVariants = [...(asset.processedVariants || []).filter((item) => item.kind !== 'green-alpha'), variant]
       success += 1
@@ -933,6 +935,60 @@ function runGreenScreenFfmpeg(ffmpegPath: string, inputPath: string, outputPath:
       } else {
         reject(new Error(stderr.split(/\r?\n/).filter(Boolean).slice(-4).join(' ') || `FFmpeg 失败：${code}`))
       }
+    })
+  })
+}
+
+function probeAlphaVisibleBounds(
+  ffmpegPath: string,
+  inputPath: string,
+  fallbackWidth?: number,
+  fallbackHeight?: number
+): Promise<NonNullable<Asset['processedVariants']>[number]['visibleBounds'] | undefined> {
+  const args = [
+    '-hide_banner',
+    '-i',
+    inputPath,
+    '-vf',
+    'alphaextract,cropdetect=limit=0.08:round=2:reset=0',
+    '-frames:v',
+    '8',
+    '-f',
+    'null',
+    '-'
+  ]
+
+  return new Promise((resolve) => {
+    const child = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', () => resolve(undefined))
+    child.on('close', () => {
+      const sizeMatch = stderr.match(/,\s*(\d{2,5})x(\d{2,5})(?:\s|,|\[)/)
+      const width = fallbackWidth || (sizeMatch ? Number(sizeMatch[1]) : 0)
+      const height = fallbackHeight || (sizeMatch ? Number(sizeMatch[2]) : 0)
+      const crops = Array.from(stderr.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g))
+      const crop = crops[crops.length - 1]
+      if (!crop || !width || !height) {
+        resolve(undefined)
+        return
+      }
+      const cropWidth = Number(crop[1])
+      const cropHeight = Number(crop[2])
+      const left = Number(crop[3])
+      const top = Number(crop[4])
+      if (cropWidth <= 0 || cropHeight <= 0 || cropWidth * cropHeight < width * height * 0.0005) {
+        resolve(undefined)
+        return
+      }
+      resolve({
+        left: clamp(left / width, 0, 1),
+        top: clamp(top / height, 0, 1),
+        width: clamp(cropWidth / width, 0.02, 1),
+        height: clamp(cropHeight / height, 0.02, 1)
+      })
     })
   })
 }

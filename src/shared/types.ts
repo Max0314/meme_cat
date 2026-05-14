@@ -13,6 +13,13 @@ export type AssetType = 'image' | 'video' | 'audio' | 'gif' | 'font'
 
 export type RiskLevel = 'safe' | 'medium' | 'high'
 
+export interface VisibleBounds {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 export interface AssetProcessedVariant {
   kind: 'green-alpha'
   format: 'webm' | 'png'
@@ -25,6 +32,7 @@ export interface AssetProcessedVariant {
   height?: number
   duration?: number
   fileUrl?: string
+  visibleBounds?: VisibleBounds
 }
 
 export interface Asset {
@@ -148,6 +156,21 @@ export interface VisualTransform {
   opacity: number
 }
 
+export type VisualKeyframeCurvePreset = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'hold' | 'back-out' | 'elastic' | 'custom'
+
+export interface VisualCurvePoint {
+  x: number
+  y: number
+  left?: { x: number; y: number }
+  right?: { x: number; y: number }
+}
+
+export interface VisualKeyframeCurve {
+  preset: VisualKeyframeCurvePreset
+  cubic?: [number, number, number, number]
+  points?: VisualCurvePoint[]
+}
+
 export interface VisualKeyframe {
   id: string
   frame: number
@@ -156,7 +179,9 @@ export interface VisualKeyframe {
   scale: number
   rotation: number
   opacity: number
+  roleLabelVisible?: boolean
   effectIntensity?: number
+  curve?: VisualKeyframeCurve
 }
 
 export interface VisualKeying {
@@ -170,6 +195,48 @@ export interface RoleLabel {
   text?: string
   visible?: boolean
   style?: Partial<SubtitleStyle>
+}
+
+export interface SubtitleCue {
+  id: string
+  startFrame: number
+  durationFrames: number
+  text: string
+}
+
+export interface SubtitleBinding {
+  roleId?: string
+  hideWhenRoleMissing: true
+}
+
+export interface SubtitleBox {
+  widthPct: number
+  heightPct?: number
+  autoHeight: boolean
+  padding: number
+  lineHeight: number
+  textAlign: 'left' | 'center' | 'right'
+  verticalAlign: 'top' | 'middle' | 'bottom'
+  overflow: 'fit-font' | 'wrap' | 'clip'
+}
+
+export type RoleStateFitMode = 'visible-bounds' | 'previous' | 'native'
+
+export interface RoleStateCue {
+  id: string
+  assetId: string
+  startFrame: number
+  durationFrames: number
+  sourceInFrame?: number
+  playbackRate?: number
+  muted?: boolean
+  volume?: number
+  scale?: number
+  offsetX?: number
+  offsetY?: number
+  fitMode?: RoleStateFitMode
+  label?: string
+  keying?: Partial<VisualKeying>
 }
 
 export interface CharacterMemeState {
@@ -218,6 +285,10 @@ export interface TimelineItem {
   transform?: Partial<VisualTransform>
   keyframes?: VisualKeyframe[]
   keying?: Partial<VisualKeying>
+  subtitleCues?: SubtitleCue[]
+  subtitleBinding?: SubtitleBinding
+  subtitleBox?: SubtitleBox
+  roleStates?: RoleStateCue[]
 }
 
 export interface ExportPreset {
