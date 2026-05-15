@@ -4483,15 +4483,7 @@ function QuickPreviewLayer({
   useEffect(() => {
     const video = videoRef.current
     if (!video || mediaType !== 'video') return
-    video.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
-    if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
-      video.currentTime = Math.max(0, currentSeconds)
-    }
-    if (isPlaying) {
-      void video.play().catch(() => undefined)
-    } else {
-      video.pause()
-    }
+    syncPreviewVideoElement(video, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))
   }, [asset, currentSeconds, isPlaying, item, mediaType, playbackRate])
 
   let content: JSX.Element | null = null
@@ -4523,7 +4515,21 @@ function QuickPreviewLayer({
       />
     )
   } else if (mediaType === 'video') {
-    content = <video ref={videoRef} src={mediaSrc} muted playsInline preload="auto" onLoadedMetadata={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
+    content = (
+      <video
+        ref={videoRef}
+        src={mediaSrc}
+        muted
+        playsInline
+        preload="auto"
+        onLoadedMetadata={(event) => {
+          setMediaSize(mediaElementSize(event.currentTarget))
+          syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))
+        }}
+        onLoadedData={(event) => syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))}
+        onCanPlay={(event) => syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))}
+      />
+    )
   } else if (['image', 'gif'].includes(mediaType)) {
     content = <img src={mediaSrc} alt="" loading="lazy" decoding="async" onLoad={(event) => setMediaSize(mediaElementSize(event.currentTarget))} />
   }
@@ -4719,14 +4725,7 @@ function AlphaMediaCanvas({
   useEffect(() => {
     const video = videoRef.current
     if (!video || mediaType !== 'video') return
-    if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
-      video.currentTime = Math.max(0, currentSeconds)
-    }
-    if (isPlaying) {
-      void video.play().catch(() => undefined)
-    } else {
-      video.pause()
-    }
+    syncPreviewVideoElement(video, currentSeconds, isPlaying)
   }, [currentSeconds, isPlaying, mediaType, src])
 
   useEffect(() => {
@@ -4761,6 +4760,11 @@ function AlphaMediaCanvas({
             const size = mediaElementSize(event.currentTarget)
             setCanvasSize(size)
             onMediaSize(size)
+            syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying)
+          }}
+          onLoadedData={(event) => {
+            syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying)
+            draw()
           }}
           onSeeked={draw}
         />
@@ -4807,45 +4811,41 @@ function KeyedMediaCanvas({
   const [canvasSize, setCanvasSize] = useState(() => mediaCanvasSize(asset))
   const keying = normalizeKeying(item.keying)
 
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    const media = asset.type === 'video' ? videoRef.current : imageRef.current
+    if (canvas && media && mediaReady(media)) {
+      const bounds = drawKeyedFrame(canvas, media, keying, measureBounds)
+      if (measureBounds) {
+        onVisibleBounds(bounds && isUsefulForegroundBounds(bounds) ? bounds : { left: 0, top: 0, width: 1, height: 1 })
+      }
+    }
+  }, [asset.type, keying.blend, keying.color, keying.enabled, keying.similarity, measureBounds, onVisibleBounds])
+
   useEffect(() => {
     const video = videoRef.current
     if (!video || asset.type !== 'video') return
-    video.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
-    if (!isPlaying || Math.abs(video.currentTime - currentSeconds) > 0.45) {
-      video.currentTime = Math.max(0, currentSeconds)
-    }
-    if (isPlaying) {
-      void video.play().catch(() => undefined)
-    } else {
-      video.pause()
-    }
+    syncPreviewVideoElement(video, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))
   }, [asset, currentSeconds, isPlaying, item, playbackRate])
 
   useEffect(() => {
     let frame = 0
     let stopped = false
 
-    function draw(): void {
+    function drawFrame(): void {
       if (stopped) return
-      const canvas = canvasRef.current
-      const media = asset.type === 'video' ? videoRef.current : imageRef.current
-      if (canvas && media && mediaReady(media)) {
-        const bounds = drawKeyedFrame(canvas, media, keying, measureBounds)
-        if (measureBounds) {
-          onVisibleBounds(bounds && isUsefulForegroundBounds(bounds) ? bounds : { left: 0, top: 0, width: 1, height: 1 })
-        }
-      }
+      draw()
       if (asset.type === 'video' && isPlaying) {
-        frame = window.requestAnimationFrame(draw)
+        frame = window.requestAnimationFrame(drawFrame)
       }
     }
 
-    draw()
+    drawFrame()
     return () => {
       stopped = true
       window.cancelAnimationFrame(frame)
     }
-  }, [asset.type, currentSeconds, isPlaying, keying.blend, keying.color, keying.enabled, keying.similarity, measureBounds, onVisibleBounds])
+  }, [asset.type, currentSeconds, draw, isPlaying])
 
   return (
     <>
@@ -4860,7 +4860,13 @@ function KeyedMediaCanvas({
             const size = mediaElementSize(event.currentTarget)
             setCanvasSize(size)
             onMediaSize(size)
+            syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))
           }}
+          onLoadedData={(event) => {
+            syncPreviewVideoElement(event.currentTarget, currentSeconds, isPlaying, playbackRate * mediaPlaybackRateForAsset(item, asset))
+            draw()
+          }}
+          onSeeked={draw}
         />
       ) : (
         <img
@@ -5807,6 +5813,14 @@ function Timeline({
     return Math.max(fps, Math.round(seconds * fps))
   }
 
+  function routedDropTrack(asset: Asset, requestedTrack: TimelineTrack): TimelineTrack | undefined {
+    if (canDropAssetOnTimelineTrack(project, asset, requestedTrack)) return requestedTrack
+    const selectedItem = selectedItemId ? project.timeline.find((item) => item.id === selectedItemId) || null : null
+    const fallbackTrackId = trackIdForAssetDrop(project, asset, selectedItem)
+    const fallbackTrack = project.tracks.find((track) => track.id === fallbackTrackId)
+    return fallbackTrack && canDropAssetOnTimelineTrack(project, asset, fallbackTrack) ? fallbackTrack : undefined
+  }
+
   function assetDropFrame(rawFrame: number, durationFrames: number, trackId: string, altKey: boolean, laneWidth: number): { frame: number; label?: string } {
     const safeFrame = clampNumber(rawFrame, 0, Math.max(0, totalFrames - 1))
     if (!snapEnabled || altKey) return { frame: safeFrame }
@@ -5842,14 +5856,15 @@ function Timeline({
     const rawFrame = frameFromClientX(event.currentTarget, event.clientX)
     const durationFrames = assetDropDuration(asset)
     const snap = assetDropFrame(rawFrame, durationFrames, track.id, event.altKey, event.currentTarget.getBoundingClientRect().width)
+    const routedTrack = routedDropTrack(asset, track)
     setAssetDropPreview({
       trackId: track.id,
       frame: snap.frame,
       durationFrames,
-      valid: canDropAssetOnTimelineTrack(project, asset, track),
-      label: snap.label
+      valid: Boolean(routedTrack),
+      label: routedTrack && routedTrack.id !== track.id ? `转到 ${displayTrackName(routedTrack)}` : snap.label
     })
-    event.dataTransfer.dropEffect = track.locked || !canDropAssetOnTimelineTrack(project, asset, track) ? 'none' : 'copy'
+    event.dataTransfer.dropEffect = routedTrack ? 'copy' : 'none'
   }
 
   function handleAssetTrackLabelDragOver(event: DragEvent<HTMLDivElement>, track: TimelineTrack): void {
@@ -5860,8 +5875,8 @@ function Timeline({
     if (!asset) return
     event.preventDefault()
     event.stopPropagation()
-    event.dataTransfer.dropEffect = track.locked || !canDropAssetOnTimelineTrack(project, asset, track) ? 'none' : 'copy'
-    setTrackDropTarget(track.id)
+    event.dataTransfer.dropEffect = routedDropTrack(asset, track) ? 'copy' : 'none'
+    if (routedDropTrack(asset, track)) setTrackDropTarget(track.id)
   }
 
   function handleAssetTrackLabelDrop(event: DragEvent<HTMLDivElement>, track: TimelineTrack): void {
@@ -5869,7 +5884,9 @@ function Timeline({
     event.preventDefault()
     event.stopPropagation()
     const assetId = assetIdFromDrag(event)
-    if (assetId) onDropAsset(assetId, track.id, playheadFrame)
+    const asset = availableAssets.find((item) => item.id === assetId)
+    const targetTrack = asset ? routedDropTrack(asset, track) : undefined
+    if (assetId && targetTrack) onDropAsset(assetId, targetTrack.id, playheadFrame)
     setTrackDropTarget(null)
   }
 
@@ -5883,8 +5900,14 @@ function Timeline({
       setAssetDropPreview(null)
       return
     }
+    const requestedTrack = project.tracks.find((track) => track.id === trackId)
+    const targetTrack = requestedTrack ? routedDropTrack(asset, requestedTrack) : undefined
+    if (!targetTrack) {
+      setAssetDropPreview(null)
+      return
+    }
     const frame = assetDropPreview?.trackId === trackId ? assetDropPreview.frame : frameFromClientX(event.currentTarget, event.clientX)
-    onDropAsset(assetId, trackId, frame)
+    onDropAsset(assetId, targetTrack.id, frame)
     setAssetDropPreview(null)
   }
 
@@ -7554,6 +7577,34 @@ function mediaPlaybackSeconds(item: TimelineItem, asset: Asset, localFrame: numb
   const rawSeconds = sourceFrame / fps
   if (!item.loop || !asset.duration || asset.duration <= 0.05) return rawSeconds
   return rawSeconds % asset.duration
+}
+
+function syncPreviewVideoElement(video: HTMLVideoElement, currentSeconds: number, isPlaying: boolean, playbackRate = 1): void {
+  video.playbackRate = clampNumber(playbackRate, 0.125, 8)
+  const targetSeconds = Math.max(0, currentSeconds)
+  if (isPlaying) {
+    if (Math.abs(video.currentTime - targetSeconds) > 0.45) {
+      video.currentTime = targetSeconds
+    }
+    void video.play().catch(() => undefined)
+    return
+  }
+
+  video.pause()
+  if (video.readyState < 1) {
+    video.load()
+    return
+  }
+
+  const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : targetSeconds
+  const pausedFrameSeconds = targetSeconds <= 0 && duration > 0.05 ? Math.min(0.001, duration) : Math.min(targetSeconds, duration)
+  if (Math.abs(video.currentTime - pausedFrameSeconds) > 0.035 || video.readyState < 2) {
+    try {
+      video.currentTime = pausedFrameSeconds
+    } catch {
+      // Some codecs reject early seeks until metadata is fully ready; loadeddata/canplay will retry.
+    }
+  }
 }
 
 function itemPlaybackRate(item: TimelineItem): number {
