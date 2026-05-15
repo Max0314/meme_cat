@@ -15,3 +15,12 @@ data/**/*
 !projects/.gitkeep
 !output/.gitkeep
 !data/.gitkeep
+full/
+release-*/
+release-full/
+data/render-temp/
+data/*.backup*.json
+data/waveforms/
+data/thumb-cache/
+assets/processed/
+assets/thumb-cache/

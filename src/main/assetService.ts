@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -7,7 +7,9 @@ import ffmpegStaticPath from 'ffmpeg-static'
 import type {
   AppSettings,
   Asset,
+  AssetMetadataPatch,
   AssetProvider,
+  GreenScreenCacheCleanupResult,
   GreenScreenPreprocessProgress,
   GreenScreenPreprocessRequest,
   GreenScreenPreprocessResult,
@@ -17,6 +19,7 @@ import type {
   DownloadAssetRequest,
   RemoteAssetResult,
   VisualKeying,
+  WaveformData,
   WorkspaceInfo
 } from '../shared/types'
 import { assetIndexPath } from './workspace'
@@ -128,11 +131,6 @@ function mergeAssetIndexes(bundledAssets: Asset[], workspaceAssets: Asset[]): As
 
 function bundledAssetRelativePath(asset: Asset): string {
   const normalizedPath = path.normalize(asset.localPath || '')
-  const sourceRoot = path.normalize('D:\\cat_meme\\assets')
-  if (normalizedPath.toLowerCase().startsWith(`${sourceRoot.toLowerCase()}${path.sep}`)) {
-    return path.relative(sourceRoot, normalizedPath)
-  }
-
   const parts = normalizedPath.split(/[\\/]+/).filter(Boolean)
   const assetsIndex = parts.findIndex((part) => part.toLowerCase() === 'assets')
   if (assetsIndex >= 0 && assetsIndex < parts.length - 1) {
@@ -156,6 +154,71 @@ export function withFileUrl<T extends { localPath?: string }>(value: T): T & { f
         }
       : {})
   }
+}
+
+export async function updateAssetMetadata(info: WorkspaceInfo, assetId: string, patch: AssetMetadataPatch): Promise<Asset> {
+  const assets = await loadAssetIndex(info)
+  const index = assets.findIndex((asset) => asset.id === assetId)
+  if (index < 0) throw new Error('素材不存在')
+  const nextAsset: Asset = {
+    ...assets[index],
+    favorite: patch.favorite ?? assets[index].favorite,
+    lastUsedAt: patch.lastUsedAt ?? assets[index].lastUsedAt,
+    useCount: patch.useCount ?? assets[index].useCount
+  }
+  const nextAssets = [...assets]
+  nextAssets[index] = nextAsset
+  await saveAssetIndex(info, nextAssets)
+  return withFileUrl(nextAsset)
+}
+
+export async function getAssetWaveform(info: WorkspaceInfo, assetId: string): Promise<WaveformData> {
+  const assets = await loadAssetIndex(info)
+  const asset = assets.find((entry) => entry.id === assetId)
+  if (!asset?.localPath || !existsSync(asset.localPath) || !['audio', 'video'].includes(asset.type)) {
+    return emptyWaveform(assetId, asset?.duration)
+  }
+
+  const sourceInfo = await stat(asset.localPath)
+  const cacheDir = path.join(info.dataDir, 'waveforms')
+  const cachePath = path.join(cacheDir, `${sanitizeFilename(asset.id)}-${sourceInfo.size}-${Math.round(sourceInfo.mtimeMs)}.json`)
+  const cached = await readJson<WaveformData | null>(cachePath, null)
+  if (cached?.assetId === assetId && Array.isArray(cached.samples)) return cached
+
+  await mkdir(cacheDir, { recursive: true })
+  const waveform = await readAudioSamples(resolveFfmpegPath(), asset.localPath)
+    .then((buffer) => analyzeWaveform(assetId, buffer, asset.duration))
+    .catch(() => emptyWaveform(assetId, asset.duration))
+  await writeJson(cachePath, waveform)
+  return waveform
+}
+
+export async function cleanupGreenScreenCache(info: WorkspaceInfo): Promise<GreenScreenCacheCleanupResult> {
+  const cacheDir = path.join(info.assetsDir, 'processed', 'green-alpha')
+  if (!existsSync(cacheDir)) return { deleted: 0, bytes: 0 }
+
+  const cacheRoot = path.resolve(cacheDir)
+  const assets = await loadAssetIndex(info)
+  const referenced = new Set(
+    assets
+      .flatMap((asset) => asset.processedVariants || [])
+      .filter((variant) => variant.kind === 'green-alpha')
+      .map((variant) => path.resolve(variant.localPath).toLowerCase())
+  )
+
+  let deleted = 0
+  let bytes = 0
+  const entries = await readdir(cacheDir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const filePath = path.resolve(cacheDir, entry.name)
+    if (!isPathInside(filePath, cacheRoot) || referenced.has(filePath.toLowerCase())) continue
+    const fileInfo = await stat(filePath)
+    await unlink(filePath)
+    deleted += 1
+    bytes += fileInfo.size
+  }
+  return { deleted, bytes }
 }
 
 function serializeAsset(asset: Asset): Asset {
@@ -993,8 +1056,79 @@ function probeAlphaVisibleBounds(
   })
 }
 
+function readAudioSamples(ffmpegPath: string, inputPath: string): Promise<Buffer> {
+  const args = ['-hide_banner', '-i', inputPath, '-vn', '-ac', '1', '-ar', '8000', '-t', '180', '-f', 'f32le', 'pipe:1']
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, args, { windowsHide: true })
+    const chunks: Buffer[] = []
+    let stderr = ''
+    child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0 && chunks.length) {
+        resolve(Buffer.concat(chunks))
+      } else {
+        reject(new Error(stderr.split(/\r?\n/).filter(Boolean).slice(-4).join(' ') || `FFmpeg waveform failed: ${code}`))
+      }
+    })
+  })
+}
+
+function analyzeWaveform(assetId: string, buffer: Buffer, duration?: number): WaveformData {
+  const totalSamples = Math.floor(buffer.length / 4)
+  if (!totalSamples) return emptyWaveform(assetId, duration)
+  const bucketCount = 96
+  const buckets = new Array<number>(bucketCount).fill(0)
+  let globalPeak = 0
+  let absoluteSum = 0
+
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const start = Math.floor((bucket / bucketCount) * totalSamples)
+    const end = Math.max(start + 1, Math.floor(((bucket + 1) / bucketCount) * totalSamples))
+    let bucketPeak = 0
+    for (let index = start; index < end; index += 1) {
+      const value = Math.abs(buffer.readFloatLE(index * 4))
+      if (!Number.isFinite(value)) continue
+      bucketPeak = Math.max(bucketPeak, value)
+      globalPeak = Math.max(globalPeak, value)
+      absoluteSum += value
+    }
+    buckets[bucket] = bucketPeak
+  }
+
+  const peak = clamp(globalPeak, 0, 1)
+  const normalizer = globalPeak > 0 ? globalPeak : 1
+  return {
+    assetId,
+    samples: buckets.map((value) => Number(clamp(value / normalizer, 0, 1).toFixed(3))),
+    peak: Number(peak.toFixed(3)),
+    mean: Number(clamp(absoluteSum / totalSamples, 0, 1).toFixed(3)),
+    duration,
+    createdAt: new Date().toISOString()
+  }
+}
+
+function emptyWaveform(assetId: string, duration?: number): WaveformData {
+  return {
+    assetId,
+    samples: [],
+    peak: 0,
+    mean: 0,
+    duration,
+    createdAt: new Date().toISOString()
+  }
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min))
+}
+
+function isPathInside(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 function sanitizeFilename(value: string): string {

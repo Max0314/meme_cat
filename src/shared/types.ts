@@ -51,8 +51,31 @@ export interface Asset {
   width?: number
   height?: number
   createdAt: string
+  favorite?: boolean
+  lastUsedAt?: string
+  useCount?: number
   fileUrl?: string
   processedVariants?: AssetProcessedVariant[]
+}
+
+export interface AssetMetadataPatch {
+  favorite?: boolean
+  lastUsedAt?: string
+  useCount?: number
+}
+
+export interface WaveformData {
+  assetId: string
+  samples: number[]
+  peak: number
+  mean: number
+  duration?: number
+  createdAt: string
+}
+
+export interface GreenScreenCacheCleanupResult {
+  deleted: number
+  bytes: number
 }
 
 export interface RemoteAssetResult {
@@ -275,6 +298,8 @@ export interface TimelineItem {
   playbackRate?: number
   effects: TimelineEffect[]
   volume?: number
+  fadeInFrames?: number
+  fadeOutFrames?: number
   loop?: boolean
   text?: string
   speakerName?: string
@@ -368,7 +393,7 @@ export interface CatMemeTemplate {
 export interface RenderRequest {
   project: ProjectFile
   preset: ExportPreset
-  mode: 'preview' | 'export'
+  mode: 'preview' | 'export' | 'cover'
   outputDir?: string
   outputPath?: string
 }

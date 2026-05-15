@@ -5,11 +5,13 @@ import type {
   AiTtsRequest,
   AppSettings,
   Asset,
+  AssetMetadataPatch,
   AssetSearchRequest,
   AssetSearchResponse,
   CatMemeTemplate,
   DownloadAssetRequest,
   ExportPreset,
+  GreenScreenCacheCleanupResult,
   GreenScreenPreprocessProgress,
   GreenScreenPreprocessRequest,
   GreenScreenPreprocessResult,
@@ -17,6 +19,7 @@ import type {
   RenderProgress,
   RenderRequest,
   RenderResult,
+  WaveformData,
   WorkspaceInfo
 } from '../shared/types'
 
@@ -32,6 +35,9 @@ const api = {
   searchAssets: (request: AssetSearchRequest): Promise<AssetSearchResponse> => ipcRenderer.invoke('asset.search', request),
   downloadAsset: (request: DownloadAssetRequest): Promise<Asset> => ipcRenderer.invoke('asset.download', request),
   importLocalAssets: (): Promise<Asset[]> => ipcRenderer.invoke('asset.importLocal'),
+  updateAsset: (assetId: string, patch: AssetMetadataPatch): Promise<Asset> => ipcRenderer.invoke('asset.update', assetId, patch),
+  getAssetWaveform: (assetId: string): Promise<WaveformData> => ipcRenderer.invoke('asset.waveform', assetId),
+  cleanupGreenScreenCache: (): Promise<GreenScreenCacheCleanupResult> => ipcRenderer.invoke('asset.cleanupGreenScreenCache'),
   preprocessGreenScreen: (request: GreenScreenPreprocessRequest): Promise<GreenScreenPreprocessResult> =>
     ipcRenderer.invoke('asset.preprocessGreenScreen', request),
   onGreenScreenPreprocessProgress: (callback: (progress: GreenScreenPreprocessProgress) => void): (() => void) => {
@@ -43,6 +49,7 @@ const api = {
   tts: (request: AiTtsRequest): Promise<Asset> => ipcRenderer.invoke('ai.tts', request),
   renderPreview: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.preview', request),
   renderExport: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.export', request),
+  renderCover: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.cover', request),
   onRenderProgress: (callback: (progress: RenderProgress) => void): (() => void) => {
     const listener = (_event: IpcRendererEvent, progress: RenderProgress): void => callback(progress)
     ipcRenderer.on('render.progress', listener)

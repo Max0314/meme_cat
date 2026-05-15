@@ -82,49 +82,55 @@ export async function renderProject(
   onProgress?: (progress: RenderProgress) => void
 ): Promise<RenderResult> {
   const ffmpegPath = resolveFfmpegPath()
-  const preset = request.mode === 'preview' ? previewPreset(request.preset) : request.preset
+  const layoutPreset = request.preset
+  const outputPreset = request.mode === 'preview' ? previewPreset(request.preset) : request.preset
   const now = new Date()
   const baseName = sanitizeFilename(`${request.project.title}-${request.mode}-${now.toISOString().replace(/[:.]/g, '-')}`)
-  const outputDir = request.mode === 'export' ? request.outputDir || info.outputDir : info.outputDir
-  const outputPath = request.mode === 'export' && request.outputPath ? request.outputPath : path.join(outputDir, `${baseName}.mp4`)
+  const isCover = request.mode === 'cover'
+  const outputDir = request.mode === 'preview' ? info.outputDir : request.outputDir || info.outputDir
+  const extension = isCover ? 'jpg' : 'mp4'
+  const outputPath = request.outputPath ? request.outputPath : path.join(outputDir, `${baseName}.${extension}`)
   const tempDir = path.join(info.dataDir, 'render-temp')
-  const totalSeconds = projectDurationSeconds(request.project, preset.fps)
+  const totalSeconds = projectDurationSeconds(request.project, layoutPreset.fps)
+  const outputLabel = isCover ? '封面 JPG' : 'MP4'
   const emit = (progress: Omit<RenderProgress, 'mode'>): void => {
     onProgress?.({ mode: request.mode, ...progress })
   }
 
-  emit({ stage: 'preparing', message: '准备渲染工作区', percent: 0.05, outputPath })
+  emit({ stage: 'preparing', message: isCover ? '准备导出封面' : '准备渲染工作区', percent: 0.05, outputPath })
   await mkdir(tempDir, { recursive: true })
   await mkdir(path.dirname(outputPath), { recursive: true })
 
   const assPath = path.join(tempDir, `${baseName}.ass`)
   emit({ stage: 'building-filters', message: '组装视频图层和字幕滤镜', percent: 0.18, outputPath })
-  const args = await buildFfmpegArgs(request.project, preset, outputPath, assPath, ffmpegPath)
-  emit({ stage: 'encoding', message: 'FFmpeg 正在编码 MP4', percent: 0.28, outputPath })
+  const args = await buildFfmpegArgs(request.project, layoutPreset, outputPreset, outputPath, assPath, ffmpegPath, request.mode)
+  emit({ stage: 'encoding', message: `FFmpeg 正在生成 ${outputLabel}`, percent: 0.28, outputPath })
   try {
     await runFfmpeg(ffmpegPath, args, totalSeconds, (percent) => {
-      emit({ stage: 'encoding', message: 'FFmpeg 正在编码 MP4', percent, outputPath })
+      emit({ stage: 'encoding', message: `FFmpeg 正在生成 ${outputLabel}`, percent, outputPath })
     })
   } catch (error) {
-    emit({ stage: 'failed', message: '渲染失败', percent: 1, outputPath, error: error instanceof Error ? error.message : String(error) })
+    emit({ stage: 'failed', message: isCover ? '封面导出失败' : '渲染失败', percent: 1, outputPath, error: error instanceof Error ? error.message : String(error) })
     throw error
   }
 
-  emit({ stage: 'done', message: '渲染完成', percent: 1, outputPath })
+  emit({ stage: 'done', message: isCover ? '封面导出完成' : '渲染完成', percent: 1, outputPath })
   return {
     outputPath,
     fileUrl: pathToFileURL(outputPath).toString(),
     durationSeconds: totalSeconds,
-    preset
+    preset: outputPreset
   }
 }
 
 async function buildFfmpegArgs(
   project: ProjectFile,
-  preset: ExportPreset,
+  layoutPreset: ExportPreset,
+  outputPreset: ExportPreset,
   outputPath: string,
   assPath: string,
-  ffmpegPath: string
+  ffmpegPath: string,
+  mode: RenderRequest['mode']
 ): Promise<string[]> {
   const args: string[] = ['-hide_banner']
   const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]))
@@ -139,8 +145,8 @@ async function buildFfmpegArgs(
     .filter((item) => ['voice', 'music', 'sfx'].includes(item.type) && enabledTracks.has(item.trackId) && item.assetId && item.durationFrames > 0)
     .sort((a, b) => a.startFrame - b.startFrame)
 
-  const totalFrames = projectDurationFrames(project, preset.fps)
-  const totalSeconds = framesToSeconds(totalFrames, preset.fps)
+  const totalFrames = projectDurationFrames(project, layoutPreset.fps)
+  const totalSeconds = framesToSeconds(totalFrames, layoutPreset.fps)
   const visualSegments: VisualSegment[] = []
   const audioSegments: AudioSegment[] = []
   let inputIndex = 0
@@ -151,16 +157,16 @@ async function buildFfmpegArgs(
     '-t',
     totalSeconds.toFixed(3),
     '-i',
-    `color=c=#f6f8fb:s=${preset.width}x${preset.height}:r=${preset.fps}`
+    `color=c=#f6f8fb:s=${layoutPreset.width}x${layoutPreset.height}:r=${layoutPreset.fps}`
   )
   inputIndex += 1
 
   for (const item of visualItems) {
     const asset = item.assetId ? assetsById.get(item.assetId) : undefined
     if (!asset?.localPath) continue
-    const durationSeconds = framesToSeconds(item.durationFrames, preset.fps)
+    const durationSeconds = framesToSeconds(item.durationFrames, layoutPreset.fps)
     const sourceDurationSeconds = mediaSourceDurationSeconds(item, asset, durationSeconds)
-    const sourceInSeconds = sourceInSecondsForItem(item, asset, preset.fps)
+    const sourceInSeconds = sourceInSecondsForItem(item, asset, layoutPreset.fps)
     const alphaVariant = findGreenAlphaVariant(asset)
     const inputPath = alphaVariant?.localPath || asset.localPath
     const inputType = alphaVariant?.format === 'png' ? 'image' : alphaVariant?.format === 'webm' ? 'video' : asset.type
@@ -183,7 +189,7 @@ async function buildFfmpegArgs(
       alphaVariant,
       mediaSize: alphaVariant?.width && alphaVariant.height ? { width: alphaVariant.width, height: alphaVariant.height } : asset.width && asset.height ? { width: asset.width, height: asset.height } : (await probeMediaSize(ffmpegPath, inputPath)) || undefined
     })
-    if (asset.type === 'video' && (item.volume ?? 1) > 0 && (await hasAudioStream(ffmpegPath, asset.localPath))) {
+    if (mode !== 'cover' && asset.type === 'video' && (item.volume ?? 1) > 0 && (await hasAudioStream(ffmpegPath, asset.localPath))) {
       if (alphaVariant) {
         if (item.loop) args.push('-stream_loop', '-1')
         args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', asset.localPath)
@@ -196,23 +202,29 @@ async function buildFfmpegArgs(
     inputIndex += 1
   }
 
-  for (const item of audioItems) {
+  for (const item of mode === 'cover' ? [] : audioItems) {
     const asset = item.assetId ? assetsById.get(item.assetId) : undefined
     if (!asset?.localPath) continue
     if (asset.type === 'video' && !(await hasAudioStream(ffmpegPath, asset.localPath))) continue
-    const durationSeconds = framesToSeconds(item.durationFrames, preset.fps)
+    const durationSeconds = framesToSeconds(item.durationFrames, layoutPreset.fps)
     const sourceDurationSeconds = mediaSourceDurationSeconds(item, asset, durationSeconds)
-    const sourceInSeconds = sourceInSecondsForItem(item, asset, preset.fps)
+    const sourceInSeconds = sourceInSecondsForItem(item, asset, layoutPreset.fps)
     if (item.loop) args.push('-stream_loop', '-1')
     args.push('-ss', sourceInSeconds.toFixed(3), '-t', sourceDurationSeconds.toFixed(3), '-i', asset.localPath)
     audioSegments.push({ inputIndex, item, durationSeconds })
     inputIndex += 1
   }
 
-  const filter = await buildFilterComplex(project, preset, visualSegments, audioSegments, assPath)
+  const filter = await buildFilterComplex(project, layoutPreset, outputPreset, visualSegments, audioSegments, assPath)
   args.push('-filter_complex', filter, '-map', '[vout]')
+  if (mode === 'cover') {
+    const coverSeconds = framesToSeconds(clamp(outputPreset.coverFrame || 0, 0, Math.max(0, totalFrames - 1)), layoutPreset.fps)
+    args.push('-ss', coverSeconds.toFixed(3), '-frames:v', '1', '-q:v', '2', '-update', '1', '-y', outputPath)
+    return args
+  }
+
   if (audioSegments.length) {
-    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', preset.audioBitrate)
+    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', outputPreset.audioBitrate)
   } else {
     args.push('-an')
   }
@@ -223,9 +235,9 @@ async function buildFfmpegArgs(
     '-preset',
     'veryfast',
     '-r',
-    String(preset.fps),
+    String(outputPreset.fps),
     '-b:v',
-    preset.videoBitrate,
+    outputPreset.videoBitrate,
     '-pix_fmt',
     'yuv420p',
     '-movflags',
@@ -242,6 +254,7 @@ async function buildFfmpegArgs(
 async function buildFilterComplex(
   project: ProjectFile,
   preset: ExportPreset,
+  outputPreset: ExportPreset,
   visualSegments: VisualSegment[],
   audioSegments: AudioSegment[],
   assPath: string
@@ -305,7 +318,7 @@ async function buildFilterComplex(
     })
   })
 
-  const subtitleItems = buildSubtitleItems(project, preset.fps)
+  const subtitleItems = buildSubtitleItems(project)
   const hasRoleLabels = visualSegments.some((segment) => {
     const label = roleLabelForItem(segment.item)
     return Boolean(label.text.trim()) && visualRenderChunks(segment.item, preset).some((chunk) => chunk.roleLabelVisible ?? label.visible)
@@ -313,9 +326,9 @@ async function buildFilterComplex(
   if (subtitleItems.length || hasRoleLabels) {
     await writeFile(assPath, makeAssFile(project, preset, subtitleItems, visualSegments), 'utf-8')
     filters.push(`[${currentVideoLabel}]subtitles='${escapeFilterPath(assPath)}'[vsub]`)
-    filters.push('[vsub]format=yuv420p[vout]')
+    filters.push(buildOutputVideoFilter('vsub', preset, outputPreset))
   } else {
-    filters.push(`[${currentVideoLabel}]format=yuv420p[vout]`)
+    filters.push(buildOutputVideoFilter(currentVideoLabel, preset, outputPreset))
   }
 
   if (audioSegments.length) {
@@ -323,15 +336,22 @@ async function buildFilterComplex(
     audioSegments.forEach((segment, index) => {
       const label = `a${index}`
       const delay = Math.max(0, Math.round(framesToSeconds(segment.item.startFrame, preset.fps) * 1000))
-      const volume = Math.max(0, Math.min(segment.item.volume ?? 1, 2.5)).toFixed(2)
+      const volume = clamp(segment.item.volume ?? 1, 0, 2.5).toFixed(3)
       const rate = itemPlaybackRate(segment.item)
       const sourceDurationSeconds = segment.durationSeconds * rate
-      const audioFilters = [
+      const fadeInSeconds = framesToSeconds(clamp(segment.item.fadeInFrames || 0, 0, segment.item.durationFrames), preset.fps)
+      const fadeOutSeconds = framesToSeconds(clamp(segment.item.fadeOutFrames || 0, 0, segment.item.durationFrames), preset.fps)
+      const audioFilters: string[] = [
         `atrim=duration=${sourceDurationSeconds.toFixed(3)}`,
         'asetpts=PTS-STARTPTS',
         ...atempoFilters(rate),
+        ...(fadeInSeconds > 0 ? [`afade=t=in:st=0:d=${fadeInSeconds.toFixed(3)}`] : []),
+        ...(fadeOutSeconds > 0
+          ? [`afade=t=out:st=${Math.max(0, segment.durationSeconds - fadeOutSeconds).toFixed(3)}:d=${fadeOutSeconds.toFixed(3)}`]
+          : []),
         `volume=${volume}`,
-        `adelay=${delay}|${delay}`
+        `adelay=${delay}|${delay}`,
+        ...audioDuckingFilters(segment, audioSegments, preset)
       ]
       filters.push(`[${segment.inputIndex}:a]${audioFilters.join(',')}[${label}]`)
       audioLabels.push(`[${label}]`)
@@ -344,6 +364,19 @@ async function buildFilterComplex(
   }
 
   return filters.join(';')
+}
+
+function buildOutputVideoFilter(inputLabel: string, layoutPreset: ExportPreset, outputPreset: ExportPreset): string {
+  const filters: string[] = []
+  if (layoutPreset.width !== outputPreset.width || layoutPreset.height !== outputPreset.height) {
+    filters.push(
+      `scale=${outputPreset.width}:${outputPreset.height}:force_original_aspect_ratio=decrease`,
+      `pad=${outputPreset.width}:${outputPreset.height}:(ow-iw)/2:(oh-ih)/2:color=0xf6f8fb`,
+      'setsar=1'
+    )
+  }
+  filters.push('format=yuv420p')
+  return `[${inputLabel}]${filters.join(',')}[vout]`
 }
 
 function expandSubtitleStreamForRender(item: TimelineItem): RenderSubtitleItem[] {
@@ -450,33 +483,12 @@ function applyRoleStateRenderTransform(transform: VisualTransform, state: NonNul
   }
 }
 
-function buildSubtitleItems(project: ProjectFile, fps: number): RenderSubtitleItem[] {
+function buildSubtitleItems(project: ProjectFile): RenderSubtitleItem[] {
   const enabledTracks = new Set(project.tracks.filter((track) => !track.muted).map((track) => track.id))
-  const explicit = project.timeline
+  return project.timeline
     .flatMap((item) => expandSubtitleStreamForRender(item))
     .filter((item) => item.type === 'subtitle' && enabledTracks.has(item.trackId) && (item.text || item.speakerName) && item.durationFrames > 0)
     .sort((a, b) => a.startFrame - b.startFrame)
-  if (explicit.length) return explicit
-
-  const lines = project.script
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-  if (!lines.length) return []
-
-  const totalFrames = projectDurationFrames(project, fps)
-  const perLine = Math.max(24, Math.floor(totalFrames / lines.length))
-  return lines.map((text, index) => ({
-    id: `auto-sub-${index}`,
-    trackId: 'subtitles',
-    type: 'subtitle',
-    label: `字幕 ${index + 1}`,
-    startFrame: index * perLine,
-    durationFrames: perLine,
-    sourceInFrame: 0,
-    effects: [],
-    text
-  }))
 }
 
 function makeAssFile(project: ProjectFile, preset: ExportPreset, subtitleItems: RenderSubtitleItem[], visualSegments: VisualSegment[]): string {
@@ -1232,6 +1244,22 @@ function atempoFilters(rate: number): string[] {
   return filters
 }
 
+function audioDuckingFilters(segment: AudioSegment, audioSegments: AudioSegment[], preset: ExportPreset): string[] {
+  if (segment.item.type !== 'music') return []
+  const segmentStart = framesToSeconds(segment.item.startFrame, preset.fps)
+  const segmentEnd = segmentStart + segment.durationSeconds
+  return audioSegments
+    .filter((other) => other !== segment && other.item.type !== 'music')
+    .map((other) => {
+      const otherStart = framesToSeconds(other.item.startFrame, preset.fps)
+      const start = Math.max(segmentStart, otherStart)
+      const end = Math.min(segmentEnd, otherStart + other.durationSeconds)
+      return { start, end }
+    })
+    .filter((window) => window.end > window.start + 0.01)
+    .map((window) => `volume=0.35:enable='between(t,${window.start.toFixed(3)},${window.end.toFixed(3)})'`)
+}
+
 function sourceInSecondsForItem(item: TimelineItem, asset: Asset, fps: number): number {
   const seconds = framesToSeconds(item.sourceInFrame || 0, fps)
   if (!item.loop || !asset.duration || asset.duration <= 0.05) return seconds
@@ -1266,12 +1294,16 @@ function escapeFilterPath(filePath: string): string {
 }
 
 function previewPreset(preset: ExportPreset): ExportPreset {
+  const maxEdge = 960
+  const scale = Math.min(1, maxEdge / Math.max(1, preset.width, preset.height))
+  const width = even(Math.max(2, Math.round(preset.width * scale)))
+  const height = even(Math.max(2, Math.round(preset.height * scale)))
   return {
     ...preset,
     id: `${preset.id}-preview`,
     name: `${preset.name} 预览`,
-    width: 540,
-    height: 960,
+    width,
+    height,
     videoBitrate: '2500k',
     audioBitrate: '128k'
   }

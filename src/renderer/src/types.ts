@@ -1,7 +1,7 @@
 import type { Asset, AssetSearchRequest, TimelineItem, TrackGroupId, TrackKind, VisibleBounds } from '../../shared/types'
 export type { VisibleBounds } from '../../shared/types'
 
-export type AssetPrimaryCategory = 'all' | 'background' | 'character' | 'green-screen' | 'audio' | 'props' | 'sticker'
+export type AssetPrimaryCategory = 'all' | 'favorite' | 'recent-used' | 'background' | 'character' | 'green-screen' | 'audio' | 'props' | 'sticker'
 export type AssetSortMode = 'recent' | 'name' | 'duration' | 'type' | 'usage'
 export type AssetViewMode = 'grid' | 'list'
 export type TrackGroupFilter = TrackGroupId | 'all'

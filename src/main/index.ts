@@ -2,10 +2,19 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } fr
 import { join } from 'node:path'
 import path from 'node:path'
 import { is } from '@electron-toolkit/utils'
-import type { AppSettings, CharacterRole, GreenScreenPreprocessProgress, ProjectFile, RenderProgress, TimelineTrack } from '../shared/types'
+import type { AppSettings, AssetMetadataPatch, CharacterRole, GreenScreenPreprocessProgress, ProjectFile, RenderProgress, TimelineTrack } from '../shared/types'
 import { CAT_MEME_TEMPLATES } from '../shared/templates'
 import { EXPORT_PRESETS } from '../shared/presets'
-import { downloadAsset, importLocalAsset, loadAssetIndex, preprocessGreenScreenAssets, searchAssets } from './assetService'
+import {
+  cleanupGreenScreenCache,
+  downloadAsset,
+  getAssetWaveform,
+  importLocalAsset,
+  loadAssetIndex,
+  preprocessGreenScreenAssets,
+  searchAssets,
+  updateAssetMetadata
+} from './assetService'
 import { generateScript, synthesizeTts } from './aiService'
 import { readJson, writeJson } from './jsonStore'
 import { renderProject } from './renderService'
@@ -108,6 +117,18 @@ function registerIpc(): void {
     }
     return imported
   })
+  ipcMain.handle('asset.update', async (_event, assetId: string, patch: AssetMetadataPatch) => {
+    const info = await ensureWorkspace()
+    return updateAssetMetadata(info, assetId, patch)
+  })
+  ipcMain.handle('asset.waveform', async (_event, assetId: string) => {
+    const info = await ensureWorkspace()
+    return getAssetWaveform(info, assetId)
+  })
+  ipcMain.handle('asset.cleanupGreenScreenCache', async () => {
+    const info = await ensureWorkspace()
+    return cleanupGreenScreenCache(info)
+  })
   ipcMain.handle('asset.preprocessGreenScreen', async (_event, request) => {
     const info = await ensureWorkspace()
     return preprocessGreenScreenAssets(info, request, (progress: GreenScreenPreprocessProgress) => {
@@ -130,6 +151,12 @@ function registerIpc(): void {
   ipcMain.handle('render.export', async (_event, request) => {
     const info = await ensureWorkspace()
     return renderProject(info, { ...request, mode: 'export' }, (progress: RenderProgress) => {
+      mainWindow?.webContents.send('render.progress', progress)
+    })
+  })
+  ipcMain.handle('render.cover', async (_event, request) => {
+    const info = await ensureWorkspace()
+    return renderProject(info, { ...request, mode: 'cover' }, (progress: RenderProgress) => {
       mainWindow?.webContents.send('render.progress', progress)
     })
   })
@@ -169,12 +196,46 @@ function registerIpc(): void {
     return result.filePath.toLowerCase().endsWith('.mp4') ? result.filePath : `${result.filePath}.mp4`
   })
 
-  ipcMain.handle('shell.openExternal', async (_event, url: string) => shell.openExternal(url))
-  ipcMain.handle('shell.showItem', async (_event, filePath: string) => shell.showItemInFolder(filePath))
-  ipcMain.handle('shell.openPath', async (_event, filePath: string) => shell.openPath(filePath))
+  ipcMain.handle('shell.openExternal', async (_event, url: string) => {
+    const parsed = new URL(url)
+    if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+      throw new Error('不允许打开此类外部链接')
+    }
+    return shell.openExternal(parsed.toString())
+  })
+  ipcMain.handle('shell.showItem', async (_event, filePath: string) => {
+    const safePath = await resolveSafeUserPath(filePath)
+    return shell.showItemInFolder(safePath)
+  })
+  ipcMain.handle('shell.openPath', async (_event, filePath: string) => {
+    const safePath = await resolveSafeUserPath(filePath)
+    return shell.openPath(safePath)
+  })
 
   ipcMain.handle('templates.list', async () => CAT_MEME_TEMPLATES)
   ipcMain.handle('presets.list', async () => EXPORT_PRESETS)
+}
+
+async function resolveSafeUserPath(filePath: string): Promise<string> {
+  const info = await ensureWorkspace()
+  const resolved = path.resolve(filePath || '')
+  const roots = [
+    info.root,
+    settings?.defaultExportDir,
+    app.getPath('documents'),
+    app.getPath('downloads'),
+    app.getPath('desktop'),
+    app.getPath('videos')
+  ].filter((value): value is string => Boolean(value))
+  if (!roots.some((root) => isPathInside(resolved, path.resolve(root)))) {
+    throw new Error('不允许打开工作区之外的路径')
+  }
+  return resolved
+}
+
+function isPathInside(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 async function createDefaultProject(): Promise<ProjectFile> {

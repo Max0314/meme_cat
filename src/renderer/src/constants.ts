@@ -15,6 +15,8 @@ export const TRACK_DRAG_MIME = 'application/x-cat-meme-track'
 
 export const ASSET_PRIMARY_CATEGORIES: AssetCategory[] = [
   { id: 'all', label: '全部', description: '所有图片、视频、GIF、音频' },
+  { id: 'favorite', label: '收藏', description: '手动标记的常用素材' },
+  { id: 'recent-used', label: '最近使用', description: '近期投放到画面或时间线的素材' },
   { id: 'background', label: '背景素材', description: '场景、游戏、房间、舞台' },
   { id: 'character', label: '角色 meme', description: '香蕉猫、哭猫、震惊、生气' },
   { id: 'green-screen', label: '绿幕', description: '已加缓存或可加缓存素材' },

@@ -35,6 +35,7 @@
   Settings,
   SlidersHorizontal,
   Sparkles,
+  Star,
   StepBack,
   StepForward,
   Sticker,
@@ -70,6 +71,7 @@ import type {
   TrackKind,
   VisualKeyframe,
   VisualTransform,
+  WaveformData,
   WorkspaceInfo
 } from '../../shared/types'
 import {
@@ -124,6 +126,8 @@ type TextHandleMode = TransformHandleId | 'box-left' | 'box-right' | 'box-top' |
 
 const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
   all: [{ id: 'all', label: '全部', tokens: [] }],
+  favorite: [{ id: 'all', label: '全部收藏', tokens: [] }],
+  'recent-used': [{ id: 'all', label: '最近用过', tokens: [] }],
   background: [
     { id: 'all', label: '全部背景', tokens: [] },
     { id: 'scene-office', label: '办公室', tokens: [], exactTags: ['办公室'] },
@@ -182,6 +186,7 @@ const ASSET_SUBCATEGORIES: Record<AssetPrimaryCategory, AssetSubcategory[]> = {
 }
 
 type NormalizedTransform = ReturnType<typeof normalizeTransform>
+type SelectedCueRef = { itemId: string; cueId: string; kind: 'subtitle' | 'role' }
 const PROJECT_HISTORY_LIMIT = 100
 
 interface ProjectHistoryEntry {
@@ -223,6 +228,7 @@ function App(): JSX.Element {
   const [undoStack, setUndoStack] = useState<ProjectHistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<ProjectHistoryEntry[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
+  const [selectedCue, setSelectedCue] = useState<SelectedCueRef | null>(null)
   const [selectedKeyframe, setSelectedKeyframe] = useState<{ itemId: string; keyframeId: string } | null>(null)
   const [placementPulseItemId, setPlacementPulseItemId] = useState<string | null>(null)
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null)
@@ -243,6 +249,7 @@ function App(): JSX.Element {
   const [rightTab, setRightTab] = useState<RightTab>('templates')
   const [preview, setPreview] = useState<RenderResult | null>(null)
   const [lastExport, setLastExport] = useState<RenderResult | null>(null)
+  const [lastCover, setLastCover] = useState<RenderResult | null>(null)
   const [preprocessProgress, setPreprocessProgress] = useState<GreenScreenPreprocessProgress | null>(null)
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null)
   const [busy, setBusy] = useState<string | null>('启动中')
@@ -285,7 +292,8 @@ function App(): JSX.Element {
     return window.catMeme.onRenderProgress((progress) => {
       setRenderProgress(progress)
       const percent = Math.round(progress.percent * 100)
-      setNotice(`${progress.mode === 'preview' ? '预览' : '导出'}：${progress.message} ${percent}%`)
+      const label = progress.mode === 'preview' ? '预览' : progress.mode === 'cover' ? '封面' : '导出'
+      setNotice(`${label}：${progress.message} ${percent}%`)
     })
   }, [])
 
@@ -334,6 +342,16 @@ function App(): JSX.Element {
   useEffect(() => {
     if (selectedKeyframe && selectedItemId !== selectedKeyframe.itemId) setSelectedKeyframe(null)
   }, [selectedItemId, selectedKeyframe])
+
+  useEffect(() => {
+    if (!project || !selectedCue) return
+    const item = project.timeline.find((entry) => entry.id === selectedCue.itemId)
+    const cueExists =
+      selectedCue.kind === 'subtitle'
+        ? Boolean(item && isSubtitleStreamItem(item) && normalizeSubtitleCues(item.subtitleCues, item.durationFrames).some((cue) => cue.id === selectedCue.cueId))
+        : Boolean(item && isRoleInstanceItem(item) && normalizeRoleStates(item.roleStates, item.durationFrames).some((state) => state.id === selectedCue.cueId))
+    if (!cueExists) setSelectedCue(null)
+  }, [project, selectedCue])
 
   const contextMenuItem = useMemo(
     () => project?.timeline.find((item) => item.id === contextMenu?.itemId) || null,
@@ -479,7 +497,6 @@ function App(): JSX.Element {
     if (!contextInput) return
     window.setTimeout(() => {
       contextInputRef.current?.focus()
-      contextInputRef.current?.select()
     }, 0)
   }, [contextInput])
 
@@ -559,7 +576,7 @@ function App(): JSX.Element {
         trimSelectedEndToPlayhead()
       } else if (event.code === 'Delete' || event.code === 'Backspace') {
         event.preventDefault()
-        deleteSelectedItem()
+        if (!deleteSelectedCue()) deleteSelectedItem()
       } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') {
         event.preventDefault()
         void saveProject()
@@ -612,7 +629,7 @@ function App(): JSX.Element {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, canRedo, canUndo, clipClipboard, isPlaying, playheadFrame, project, selectedItem, totalFrames])
+  }, [activeTool, canRedo, canUndo, clipClipboard, isPlaying, playheadFrame, project, selectedCue, selectedItem, totalFrames])
 
   async function importLocalAssets(): Promise<void> {
     try {
@@ -656,6 +673,45 @@ function App(): JSX.Element {
     } finally {
       setBusy(null)
     }
+  }
+
+  async function cleanupGreenCache(): Promise<void> {
+    try {
+      setBusy('清理透明缓存')
+      const result = await window.catMeme.cleanupGreenScreenCache()
+      setNotice(`已清理未引用透明缓存 ${result.deleted} 个，释放 ${formatBytes(result.bytes)}`)
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  function patchAssetEverywhere(assetId: string, patch: Partial<Asset>): void {
+    const patchOne = (asset: Asset): Asset => (asset.id === assetId ? normalizeAsset({ ...asset, ...patch }) || { ...asset, ...patch } : asset)
+    setLocalAssets((current) => current.map(patchOne))
+    patchProjectWithoutHistory((current) => ({ ...current, assets: current.assets.map(patchOne) }))
+  }
+
+  function toggleAssetFavorite(asset: Asset): void {
+    const favorite = !asset.favorite
+    patchAssetEverywhere(asset.id, { favorite })
+    void window.catMeme.updateAsset(asset.id, { favorite }).then((saved) => {
+      const normalized = normalizeAsset(saved)
+      if (normalized) patchAssetEverywhere(asset.id, normalized)
+    }).catch((error) => setNotice(errorText(error)))
+  }
+
+  function recordAssetUse(asset: Asset): void {
+    const patch = {
+      lastUsedAt: new Date().toISOString(),
+      useCount: (asset.useCount || 0) + 1
+    }
+    patchAssetEverywhere(asset.id, patch)
+    void window.catMeme.updateAsset(asset.id, patch).then((saved) => {
+      const normalized = normalizeAsset(saved)
+      if (normalized) patchAssetEverywhere(asset.id, normalized)
+    }).catch((error) => setNotice(errorText(error)))
   }
 
   function activateEditorTool(tool: EditorToolId): void {
@@ -729,10 +785,7 @@ function App(): JSX.Element {
     if (!project || !currentPreset) return false
     const totalFrames = projectDurationFrames(project, currentPreset.fps)
     const roles = projectRoles(project)
-    const role =
-      roles.find((item) => item.defaultTrackId === track.id) ||
-      roles.find((item) => track.name.includes(item.name)) ||
-      roles[0]
+    const role = roleForTrack(project, track, roles)
     const durationFrames = Math.max(currentPreset.fps, Math.round((asset.duration || 2.4) * currentPreset.fps))
     const existing = project.timeline.find((item) => item.trackId === track.id && isRoleInstanceItem(item) && (!role || item.roleId === role.id))
     const streamDuration = Math.max(totalFrames, existing?.durationFrames || 0, startFrame + durationFrames)
@@ -758,22 +811,7 @@ function App(): JSX.Element {
     const nextStates = resolveRoleStateOverlaps([...baseStates, state], state.id, streamDuration)
     const roleItem: TimelineItem =
       existing ||
-      {
-        id: crypto.randomUUID(),
-        trackId: track.id,
-        roleId: role?.id,
-        type: 'visual',
-        label: role ? `${role.name} 角色流` : displayTrackName(track),
-        startFrame: 0,
-        durationFrames: streamDuration,
-        sourceInFrame: 0,
-        playbackRate: 1,
-        effects: defaultEffectsForTrackKind('visual'),
-        volume: 1,
-        transform: role?.defaultTransform || defaultTransformForAsset(project, asset, track.id, currentPreset),
-        roleLabel: role ? createRoleLabel(role, true) : undefined,
-        roleStates: []
-      }
+      createRoleStreamItem(project, track, streamDuration, role, asset)
     const nextRoleItem = {
       ...roleItem,
       durationFrames: streamDuration,
@@ -789,8 +827,10 @@ function App(): JSX.Element {
       timeline: existing ? project.timeline.map((item) => (item.id === existing.id ? nextRoleItem : item)) : [...project.timeline, nextRoleItem]
     })
     setSelectedItemId(nextRoleItem.id)
+    setSelectedCue({ itemId: nextRoleItem.id, cueId: state.id, kind: 'role' })
     setSelectedTrackId(track.id)
     setNotice(existing ? `已添加角色状态：${assetDisplayName(asset)}` : `已创建角色流：${assetDisplayName(asset)}`)
+    recordAssetUse(asset)
     return true
   }
 
@@ -822,7 +862,7 @@ function App(): JSX.Element {
       setNotice(assetDropBlockedMessage(asset, track))
       return false
     }
-    if (track.kind === 'visual' && trackGroupId(track) === 'role' && isCharacterLikeAsset(asset)) {
+    if (track.kind === 'visual' && trackGroupId(track) === 'role' && isVisualAsset(asset) && !isBackgroundAsset(asset)) {
       return addRoleStateToTimelineAt(asset, track, startFrame)
     }
     const trackKind = track.kind
@@ -862,6 +902,7 @@ function App(): JSX.Element {
     setSelectedItemId(item.id)
     if (trackKind === 'visual') setPlacementPulseItemId(item.id)
     setPlayheadFrame(item.startFrame)
+    recordAssetUse(asset)
     if (trackKind === 'visual' && isGreenScreenAsset(asset)) {
       void detectFirstVisibleFrame(asset, currentPreset.fps, item.keying).then((sourceInFrame) => {
         if (sourceInFrame <= 0) return
@@ -1055,6 +1096,7 @@ function App(): JSX.Element {
       timeline
     })
     setSelectedItemId(nextStream.id)
+    setSelectedCue({ itemId: nextStream.id, cueId: cue.id, kind: 'subtitle' })
     setSelectedTrackId(nextStream.trackId)
     if (options.clearInput) setQuickSubtitleText('')
     setNotice(options.notice || '已添加字幕 cue')
@@ -1072,6 +1114,181 @@ function App(): JSX.Element {
       notice: '已在当前播放头添加画布字幕'
     })
     if (created) setActiveTool('select')
+  }
+
+  function createSubtitleStreamOnTrack(trackId: string): void {
+    if (!project || !currentPreset) return
+    const track = project.tracks.find((entry) => entry.id === trackId)
+    if (!track || track.kind !== 'subtitle') return
+    if (track.locked) {
+      setNotice(`${displayTrackName(track)} 已锁定，不能创建字幕流`)
+      return
+    }
+    const totalFrames = projectDurationFrames(project, currentPreset.fps)
+    const existingStream = project.timeline.find((item) => item.trackId === trackId && isSubtitleStreamItem(item))
+    const stream = existingStream || createSubtitleStreamItem(project, trackId, totalFrames, { label: `${displayTrackName(track)}流` })
+    updateProject({
+      ...project,
+      timeline: existingStream
+        ? project.timeline.map((item) => (item.id === existingStream.id ? { ...item, durationFrames: totalFrames } : item))
+        : [...project.timeline, stream]
+    })
+    setSelectedItemId(stream.id)
+    setSelectedCue(null)
+    setSelectedTrackId(trackId)
+    setNotice('已创建字幕流，当前帧添加按钮可继续追加 cue')
+  }
+
+  function createRoleStreamOnTrack(trackId: string): TimelineItem | null {
+    if (!project || !currentPreset) return null
+    const track = project.tracks.find((entry) => entry.id === trackId)
+    if (!track || track.kind !== 'visual' || trackGroupId(track) !== 'role') return null
+    if (track.locked) {
+      setNotice(`${displayTrackName(track)} 已锁定，不能创建角色流`)
+      return null
+    }
+    const totalFrames = projectDurationFrames(project, currentPreset.fps)
+    const existingStream = project.timeline.find((item) => item.trackId === trackId && isRoleInstanceItem(item))
+    const role = roleForTrack(project, track)
+    const stream = existingStream || createRoleStreamItem(project, track, totalFrames, role)
+    updateProject({
+      ...project,
+      timeline: existingStream
+        ? project.timeline.map((item) => (item.id === existingStream.id ? { ...item, durationFrames: totalFrames } : item))
+        : [...project.timeline, stream]
+    })
+    setSelectedItemId(stream.id)
+    setSelectedCue(null)
+    setSelectedTrackId(trackId)
+    setNotice('已创建角色流，可把角色素材拖到此轨道形成状态 cue')
+    return stream
+  }
+
+  function moveCueToTrack(args: { itemId: string; cueId: string; kind: 'subtitle' | 'role'; targetTrackId: string; absoluteFrame: number }): boolean {
+    if (!project || !currentPreset) return false
+    const source = project.timeline.find((item) => item.id === args.itemId)
+    const targetTrack = project.tracks.find((track) => track.id === args.targetTrackId)
+    if (!source || !targetTrack || targetTrack.locked) return false
+    const totalFrames = projectDurationFrames(project, currentPreset.fps)
+
+    if (args.kind === 'subtitle') {
+      if (!isSubtitleStreamItem(source) || targetTrack.kind !== 'subtitle') return false
+      const cue = normalizeSubtitleCues(source.subtitleCues, source.durationFrames).find((entry) => entry.id === args.cueId)
+      if (!cue) return false
+      const targetStream =
+        project.timeline.find((item) => item.trackId === targetTrack.id && isSubtitleStreamItem(item)) ||
+        createSubtitleStreamItem(project, targetTrack.id, totalFrames, { label: `${displayTrackName(targetTrack)}流` })
+      const targetStart = clampNumber(args.absoluteFrame - targetStream.startFrame, 0, Math.max(0, targetStream.durationFrames - 1))
+      const movedCue = {
+        ...cue,
+        startFrame: targetStart,
+        durationFrames: Math.min(cue.durationFrames, Math.max(1, targetStream.durationFrames - targetStart))
+      }
+      const sourceCues = normalizeSubtitleCues(source.subtitleCues, source.durationFrames).filter((entry) => entry.id !== args.cueId)
+      const targetExists = project.timeline.some((item) => item.id === targetStream.id)
+      const nextTimeline = project.timeline
+        .map((item) => {
+          if (item.id === source.id) return { ...item, subtitleCues: sourceCues }
+          if (item.id === targetStream.id) {
+            return { ...item, subtitleCues: normalizeSubtitleCues([...(item.subtitleCues || []), movedCue], item.durationFrames) }
+          }
+          return item
+        })
+        .concat(targetExists ? [] : [{ ...targetStream, subtitleCues: normalizeSubtitleCues([movedCue], targetStream.durationFrames) }])
+      updateProject({ ...project, timeline: nextTimeline })
+      setSelectedItemId(targetStream.id)
+      setSelectedCue({ itemId: targetStream.id, cueId: movedCue.id, kind: 'subtitle' })
+      setSelectedTrackId(targetTrack.id)
+      setPlayheadFrame(args.absoluteFrame)
+      setNotice('已移动字幕 cue 到目标轨道')
+      return true
+    }
+
+    if (!isRoleInstanceItem(source) || targetTrack.kind !== 'visual' || trackGroupId(targetTrack) !== 'role') return false
+    const state = normalizeRoleStates(source.roleStates, source.durationFrames).find((entry) => entry.id === args.cueId)
+    if (!state) return false
+    const targetRole = roleForTrack(project, targetTrack)
+    const targetStream =
+      project.timeline.find((item) => item.trackId === targetTrack.id && isRoleInstanceItem(item)) ||
+      createRoleStreamItem(project, targetTrack, totalFrames, targetRole)
+    const targetStart = clampNumber(args.absoluteFrame - targetStream.startFrame, 0, Math.max(0, targetStream.durationFrames - 1))
+    const movedState = {
+      ...state,
+      startFrame: targetStart,
+      durationFrames: Math.min(state.durationFrames, Math.max(1, targetStream.durationFrames - targetStart))
+    }
+    const sourceStates = normalizeRoleStates(source.roleStates, source.durationFrames).filter((entry) => entry.id !== args.cueId)
+    const targetExists = project.timeline.some((item) => item.id === targetStream.id)
+    const nextTimeline = project.timeline
+      .map((item) => {
+        if (item.id === source.id) return { ...item, roleStates: sourceStates }
+        if (item.id === targetStream.id) {
+          return { ...item, roleStates: resolveRoleStateOverlaps([...(item.roleStates || []), movedState], movedState.id, item.durationFrames) }
+        }
+        return item
+      })
+      .concat(targetExists ? [] : [{ ...targetStream, roleStates: resolveRoleStateOverlaps([movedState], movedState.id, targetStream.durationFrames) }])
+    updateProject({ ...project, timeline: nextTimeline })
+    setSelectedItemId(targetStream.id)
+    setSelectedCue({ itemId: targetStream.id, cueId: movedState.id, kind: 'role' })
+    setSelectedTrackId(targetTrack.id)
+    setPlayheadFrame(args.absoluteFrame)
+    setNotice('已移动角色状态 cue 到目标角色轨')
+    return true
+  }
+
+  function addRoleCueFromInspector(itemId: string, assetId: string, replaceCueId?: string): void {
+    if (!project || !currentPreset) return
+    const item = project.timeline.find((entry) => entry.id === itemId)
+    const asset = project.assets.find((entry) => entry.id === assetId) || localAssets.find((entry) => entry.id === assetId)
+    if (!item || !isRoleInstanceItem(item) || !asset || !isVisualAsset(asset) || isBackgroundAsset(asset)) return
+    const states = normalizeRoleStates(item.roleStates, item.durationFrames)
+    const localFrame = clampNumber(playheadFrame - item.startFrame, 0, Math.max(0, item.durationFrames - 1))
+    const previousState = [...states].reverse().find((state) => state.startFrame <= localFrame)
+    const previousAsset = previousState ? mergeAssets(project.assets, localAssets).find((entry) => entry.id === previousState.assetId) : undefined
+    const durationFrames = Math.min(Math.max(currentPreset.fps, Math.round((asset.duration || 2.4) * currentPreset.fps)), Math.max(1, item.durationFrames - localFrame))
+    let nextCueId = replaceCueId || crypto.randomUUID()
+    const nextStates = replaceCueId
+      ? states.map((state) =>
+          state.id === replaceCueId
+            ? {
+                ...state,
+                assetId: asset.id,
+                label: asset.title || asset.filename,
+                keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined,
+                scale: state.scale ?? defaultRoleStateScale(asset, previousAsset, previousState)
+              }
+            : state
+        )
+      : [
+          ...states,
+          {
+            id: nextCueId,
+            assetId: asset.id,
+            startFrame: localFrame,
+            durationFrames,
+            sourceInFrame: 0,
+            muted: false,
+            volume: 1,
+            scale: defaultRoleStateScale(asset, previousAsset, previousState),
+            offsetX: 0,
+            offsetY: 0,
+            fitMode: 'visible-bounds' as const,
+            label: asset.title || asset.filename,
+            keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
+          }
+        ]
+    if (replaceCueId && !states.some((state) => state.id === replaceCueId)) nextCueId = ''
+    const roleStates = replaceCueId ? normalizeRoleStates(nextStates, item.durationFrames) : resolveRoleStateOverlaps(nextStates, nextCueId, item.durationFrames)
+    updateProject({
+      ...project,
+      assets: mergeAssets(project.assets, [asset]),
+      timeline: project.timeline.map((entry) => (entry.id === item.id ? { ...entry, roleStates } : entry))
+    })
+    if (nextCueId) setSelectedCue({ itemId: item.id, cueId: nextCueId, kind: 'role' })
+    setSelectedItemId(item.id)
+    setNotice(replaceCueId ? '已替换当前角色状态素材' : '已在当前帧新增角色状态 cue')
+    recordAssetUse(asset)
   }
 
   async function generateAiScript(): Promise<void> {
@@ -1191,22 +1408,29 @@ function App(): JSX.Element {
     }
   }
 
-  async function render(mode: 'preview' | 'export', outputPath?: string): Promise<void> {
+  async function render(mode: 'preview' | 'export' | 'cover', outputPath?: string): Promise<void> {
     if (!project || !currentPreset) return
     try {
-      setBusy(mode === 'preview' ? '生成预览' : '导出视频')
-      setRenderProgress({ mode, stage: 'preparing', message: mode === 'preview' ? '准备生成预览' : '准备导出视频', percent: 0 })
+      const label = mode === 'preview' ? '预览' : mode === 'cover' ? '封面' : '视频'
+      setBusy(mode === 'preview' ? '生成预览' : mode === 'cover' ? '导出封面' : '导出视频')
+      setRenderProgress({ mode, stage: 'preparing', message: mode === 'preview' ? '准备生成预览' : mode === 'cover' ? '准备导出封面' : '准备导出视频', percent: 0 })
       const request = {
         project,
         preset: currentPreset,
         mode,
         outputPath,
-        outputDir: mode === 'export' ? settings?.defaultExportDir || workspace?.outputDir : undefined
+        outputDir: mode === 'preview' ? undefined : settings?.defaultExportDir || workspace?.outputDir
       }
-      const result = mode === 'preview' ? await window.catMeme.renderPreview(request) : await window.catMeme.renderExport(request)
+      const result =
+        mode === 'preview'
+          ? await window.catMeme.renderPreview(request)
+          : mode === 'cover'
+            ? await window.catMeme.renderCover(request)
+            : await window.catMeme.renderExport(request)
       if (mode === 'preview') setPreview(result)
       if (mode === 'export') setLastExport(result)
-      setNotice(`${mode === 'preview' ? '预览' : '视频'}已生成：${result.outputPath}`)
+      if (mode === 'cover') setLastCover(result)
+      setNotice(`${label}已生成：${result.outputPath}`)
       setRenderProgress({ mode, stage: 'done', message: '渲染完成', percent: 1, outputPath: result.outputPath })
     } catch (error) {
       setNotice(errorText(error))
@@ -1362,51 +1586,88 @@ function App(): JSX.Element {
     placeRoleScene(role, asset, '')
   }
 
-  function placeRoleLine(role: CharacterRole, line: string): void {
-    if (!project || !currentPreset) return
-    const durationFrames = lineDurationFrames(line, currentPreset.fps)
-    const totalFrames = projectDurationFrames(project, currentPreset.fps)
-    const track = project.tracks.find((track) => track.id === 'subtitles')
-    const tracks = track ? project.tracks : [...project.tracks, { id: 'subtitles', name: '字幕', kind: 'subtitle' as const, groupId: 'subtitle' as const, locked: false, muted: false }]
-    const existingStream = project.timeline.find(
+  function appendSubtitleCueToStream(
+    baseProject: ProjectFile,
+    stream: TimelineItem | null,
+    trackId: string,
+    cue: SubtitleCue,
+    totalFrames: number,
+    options: {
+      role?: CharacterRole
+      label?: string
+      style?: Partial<ProjectFile['subtitleStyle']>
+      binding?: TimelineItem['subtitleBinding']
+      box?: Partial<SubtitleBox>
+    } = {}
+  ): { project: ProjectFile; stream: TimelineItem; cueId: string } {
+    const tracks = baseProject.tracks.some((track) => track.id === trackId)
+      ? baseProject.tracks
+      : [...baseProject.tracks, makeSubtitleTrack(trackId)]
+    const subtitleItem =
+      stream ||
+      createSubtitleStreamItem(baseProject, trackId, totalFrames, {
+        label: options.label,
+        style: options.style,
+        binding: options.binding,
+        roleId: options.role?.id,
+        box: options.box
+      })
+    const nextStream = {
+      ...subtitleItem,
+      startFrame: 0,
+      durationFrames: totalFrames,
+      style: normalizeSubtitleStyleConfig({ ...baseProject.subtitleStyle, ...subtitleItem.style, ...options.style }),
+      subtitleBinding: options.binding ?? subtitleItem.subtitleBinding,
+      subtitleBox: normalizeSubtitleBox(subtitleItem.subtitleBox || options.box),
+      subtitleCues: normalizeSubtitleCues([...(subtitleItem.subtitleCues || []), cue], totalFrames)
+    }
+    return {
+      project: {
+        ...baseProject,
+        tracks,
+        timeline: stream
+          ? baseProject.timeline.map((item) => (item.id === stream.id ? nextStream : item))
+          : [...baseProject.timeline, nextStream]
+      },
+      stream: nextStream,
+      cueId: cue.id
+    }
+  }
+
+  function appendRoleSubtitleCue(baseProject: ProjectFile, role: CharacterRole, line: string, startFrame: number, durationFrames: number): { project: ProjectFile; stream: TimelineItem; cueId: string } {
+    const totalFrames = currentPreset ? projectDurationFrames(baseProject, currentPreset.fps) : Math.max(startFrame + durationFrames, 30)
+    const existingStream = baseProject.timeline.find(
       (item) => isSubtitleStreamItem(item) && normalizeSubtitleBinding(item.subtitleBinding)?.roleId === role.id
     )
     const cue: SubtitleCue = {
       id: crypto.randomUUID(),
-      startFrame: clampNumber(playheadFrame - (existingStream?.startFrame || 0), 0, Math.max(0, totalFrames - 1)),
-      durationFrames: Math.min(durationFrames, Math.max(1, totalFrames - playheadFrame)),
+      startFrame: clampNumber(startFrame - (existingStream?.startFrame || 0), 0, Math.max(0, totalFrames - 1)),
+      durationFrames: Math.min(durationFrames, Math.max(1, totalFrames - startFrame)),
       text: line
     }
-    const subtitleItem: TimelineItem =
-      existingStream ||
-      {
-        id: crypto.randomUUID(),
-        trackId: 'subtitles',
-        roleId: role.id,
-        type: 'subtitle',
-        label: `${role.name} 台词流`,
-        startFrame: 0,
-        durationFrames: totalFrames,
-        sourceInFrame: 0,
-        playbackRate: 1,
-        effects: [],
-        style: { ...project.subtitleStyle, position: role.subtitlePosition },
-        subtitleBinding: { roleId: role.id, hideWhenRoleMissing: true },
-        subtitleBox: normalizeSubtitleBox({ widthPct: 64 }),
-        subtitleCues: []
-      }
-    const nextStream = {
-      ...subtitleItem,
-      durationFrames: totalFrames,
-      subtitleCues: normalizeSubtitleCues([...(subtitleItem.subtitleCues || []), cue], totalFrames)
-    }
-    updateProject({
-      ...project,
-      tracks,
-      timeline: existingStream ? project.timeline.map((item) => (item.id === existingStream.id ? nextStream : item)) : [...project.timeline, nextStream]
+    return appendSubtitleCueToStream(baseProject, existingStream || null, existingStream?.trackId || 'subtitles', cue, totalFrames, {
+      role,
+      label: `${role.name} 台词流`,
+      style: { position: role.subtitlePosition },
+      binding: { roleId: role.id, hideWhenRoleMissing: true },
+      box: { widthPct: 64 }
     })
-    setSelectedItemId(nextStream.id)
+  }
+
+  function placeRoleLineAtFrame(role: CharacterRole, line: string, startFrame: number, durationFrames = lineDurationFrames(line, currentPreset?.fps || 30)): void {
+    if (!project || !currentPreset) return
+    const result = appendRoleSubtitleCue(project, role, line, startFrame, durationFrames)
+    updateProject(result.project)
+    setSelectedItemId(result.stream.id)
+    setSelectedCue({ itemId: result.stream.id, cueId: result.cueId, kind: 'subtitle' })
+    setSelectedTrackId(result.stream.trackId)
     setNotice(`已投放 ${role.name} 台词`)
+  }
+
+  function placeRoleLine(role: CharacterRole, line: string): void {
+    if (!project || !currentPreset) return
+    const durationFrames = lineDurationFrames(line, currentPreset.fps)
+    placeRoleLineAtFrame(role, line, playheadFrame, durationFrames)
   }
 
   function placeRoleScene(role: CharacterRole, asset: Asset, line: string): void {
@@ -1414,38 +1675,55 @@ function App(): JSX.Element {
     const existingTrack = role.defaultTrackId ? project.tracks.find((track) => track.id === role.defaultTrackId) : null
     const track = existingTrack || makeRoleTrack(role)
     const tracks = existingTrack ? project.tracks : insertVisualTrack(project.tracks, track)
+    const totalFrames = projectDurationFrames({ ...project, tracks }, currentPreset.fps)
     const durationFrames = Math.max(
       currentPreset.fps,
       Math.round((asset.duration || 3.2) * currentPreset.fps),
       line ? lineDurationFrames(line, currentPreset.fps) : 0
     )
-    const visualItem: TimelineItem = {
+    const existingStream = project.timeline.find((item) => item.trackId === track.id && isRoleInstanceItem(item) && item.roleId === role.id)
+    const streamDuration = Math.max(totalFrames, existingStream?.durationFrames || 0)
+    const localStart = clampNumber(playheadFrame - (existingStream?.startFrame || 0), 0, Math.max(0, streamDuration - 1))
+    const baseStates = normalizeRoleStates(existingStream?.roleStates, streamDuration)
+    const previousState = [...baseStates].reverse().find((state) => state.startFrame <= localStart)
+    const previousAsset = previousState ? project.assets.find((item) => item.id === previousState.assetId) : undefined
+    const state: RoleStateCue = {
       id: crypto.randomUUID(),
-      trackId: track.id,
       assetId: asset.id,
-      roleId: role.id,
-      type: 'visual',
-      label: `${role.name} · ${asset.title || asset.filename}`,
-      startFrame: playheadFrame,
-      durationFrames,
+      startFrame: localStart,
+      durationFrames: Math.min(durationFrames, Math.max(1, streamDuration - localStart)),
       sourceInFrame: 0,
-      effects: defaultEffectsForTrackKind('visual'),
+      muted: false,
       volume: 1,
-      roleLabel: createRoleLabel(role, true),
-      transform: role.defaultTransform,
+      scale: defaultRoleStateScale(asset, previousAsset, previousState),
+      offsetX: 0,
+      offsetY: 0,
+      fitMode: 'visible-bounds',
+      label: asset.title || asset.filename,
       keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
     }
-    const subtitleItem = line ? createRoleSubtitleItem(role, line, playheadFrame, durationFrames) : null
-    updateProject({
+    const roleStream = existingStream || createRoleStreamItem({ ...project, tracks }, track, streamDuration, role, asset)
+    const nextRoleStream = {
+      ...roleStream,
+      durationFrames: streamDuration,
+      roleStates: resolveRoleStateOverlaps([...baseStates, state], state.id, streamDuration)
+    }
+    const projectWithRoleStream: ProjectFile = {
       ...project,
       tracks,
       assets: mergeAssets(project.assets, [asset]),
       roles: projectRoles(project).map((item) =>
         item.id === role.id ? { ...item, defaultTrackId: track.id, memeAssetIds: uniqueStrings([asset.id, ...item.memeAssetIds]) } : item
       ),
-      timeline: subtitleItem ? [...project.timeline, visualItem, subtitleItem] : [...project.timeline, visualItem]
-    })
-    setSelectedItemId(visualItem.id)
+      timeline: existingStream
+        ? project.timeline.map((item) => (item.id === existingStream.id ? nextRoleStream : item))
+        : [...project.timeline, nextRoleStream]
+    }
+    const result = line ? appendRoleSubtitleCue(projectWithRoleStream, role, line, playheadFrame, durationFrames) : null
+    updateProject(result?.project || projectWithRoleStream)
+    setSelectedItemId(nextRoleStream.id)
+    setSelectedCue({ itemId: nextRoleStream.id, cueId: state.id, kind: 'role' })
+    setSelectedTrackId(track.id)
     setPlayheadFrame(playheadFrame)
     setNotice(line ? `已投放 ${role.name} 镜头和台词` : `已投放 ${role.name} 镜头`)
   }
@@ -1506,7 +1784,7 @@ function App(): JSX.Element {
   }
 
   function addTrackForGroup(groupId: TrackGroupId = 'role', requestedKind?: TrackKind): void {
-    if (!project) return
+    if (!project || !currentPreset) return
     const kind = trackKindForGroup(groupId, requestedKind)
     const count = project.tracks.filter((track) => trackGroupId(track) === groupId && track.kind === kind).length
     const track = {
@@ -1517,7 +1795,16 @@ function App(): JSX.Element {
       locked: false,
       muted: false
     }
-    updateProject({ ...project, tracks: insertTrackInGroup(project.tracks, track) })
+    const tracks = insertTrackInGroup(project.tracks, track)
+    const totalFrames = projectDurationFrames({ ...project, tracks }, currentPreset.fps)
+    const role = groupId === 'role' && kind === 'visual' ? roleForTrack({ ...project, tracks }, track) : undefined
+    const streamItem = groupId === 'role' && kind === 'visual' ? createRoleStreamItem({ ...project, tracks }, track, totalFrames, role) : null
+    updateProject({ ...project, tracks, timeline: streamItem ? [...project.timeline, streamItem] : project.timeline })
+    if (streamItem) {
+      setSelectedItemId(streamItem.id)
+      setSelectedCue(null)
+    }
+    setSelectedTrackId(track.id)
     setNotice(`已新增 ${track.name}`)
   }
 
@@ -1626,6 +1913,8 @@ function App(): JSX.Element {
     if (!project) return false
     const localFrame = frame - item.startFrame
     if (localFrame <= 0 || localFrame >= item.durationFrames) return false
+    if (isSubtitleStreamItem(item)) return splitSubtitleCueAtFrame(item, localFrame, frame)
+    if (isRoleInstanceItem(item)) return splitRoleStateCueAtFrame(item, localFrame, frame)
     const keyframeParts = splitVisualKeyframesAtFrame(item, localFrame)
     const first: TimelineItem = { ...item, durationFrames: localFrame, keyframes: keyframeParts.first }
     const second: TimelineItem = {
@@ -1644,6 +1933,70 @@ function App(): JSX.Element {
     setSelectedItemId(second.id)
     setSelectedTrackId(second.trackId)
     setPlayheadFrame(frame)
+    return true
+  }
+
+  function splitSubtitleCueAtFrame(item: TimelineItem, localFrame: number, absoluteFrame: number): boolean {
+    if (!project) return false
+    const cues = normalizeSubtitleCues(item.subtitleCues, item.durationFrames)
+    const cue = cues.find((entry) => localFrame > entry.startFrame && localFrame < entry.startFrame + entry.durationFrames)
+    if (!cue) {
+      setNotice('播放头需要位于字幕 cue 内部')
+      return false
+    }
+    const splitOffset = localFrame - cue.startFrame
+    const nextCue: SubtitleCue = {
+      ...cue,
+      id: crypto.randomUUID(),
+      startFrame: localFrame,
+      durationFrames: cue.durationFrames - splitOffset
+    }
+    const nextCues = cues.flatMap((entry) =>
+      entry.id === cue.id
+        ? [{ ...entry, durationFrames: splitOffset }, nextCue]
+        : [entry]
+    )
+    updateProject({
+      ...project,
+      timeline: project.timeline.map((entry) => (entry.id === item.id ? { ...entry, subtitleCues: normalizeSubtitleCues(nextCues, item.durationFrames) } : entry))
+    })
+    setSelectedItemId(item.id)
+    setSelectedTrackId(item.trackId)
+    setPlayheadFrame(absoluteFrame)
+    setNotice('已拆分当前字幕 cue')
+    return true
+  }
+
+  function splitRoleStateCueAtFrame(item: TimelineItem, localFrame: number, absoluteFrame: number): boolean {
+    if (!project) return false
+    const states = normalizeRoleStates(item.roleStates, item.durationFrames)
+    const state = states.find((entry) => localFrame > entry.startFrame && localFrame < entry.startFrame + entry.durationFrames)
+    if (!state) {
+      setNotice('播放头需要位于角色状态 cue 内部')
+      return false
+    }
+    const splitOffset = localFrame - state.startFrame
+    const rate = state.playbackRate ?? itemPlaybackRate(item)
+    const nextState: RoleStateCue = {
+      ...state,
+      id: crypto.randomUUID(),
+      startFrame: localFrame,
+      sourceInFrame: Math.max(0, Math.round((state.sourceInFrame || 0) + splitOffset * rate)),
+      durationFrames: state.durationFrames - splitOffset
+    }
+    const nextStates = states.flatMap((entry) =>
+      entry.id === state.id
+        ? [{ ...entry, durationFrames: splitOffset }, nextState]
+        : [entry]
+    )
+    updateProject({
+      ...project,
+      timeline: project.timeline.map((entry) => (entry.id === item.id ? { ...entry, roleStates: normalizeRoleStates(nextStates, item.durationFrames) } : entry))
+    })
+    setSelectedItemId(item.id)
+    setSelectedTrackId(item.trackId)
+    setPlayheadFrame(absoluteFrame)
+    setNotice('已拆分当前角色状态 cue')
     return true
   }
 
@@ -1829,6 +2182,36 @@ function App(): JSX.Element {
       timeline: project.timeline.filter((item) => item.id !== selectedItem.id)
     })
     setSelectedItemId(null)
+    setSelectedCue(null)
+  }
+
+  function deleteSelectedCue(): boolean {
+    if (!project || !selectedCue) return false
+    const item = project.timeline.find((entry) => entry.id === selectedCue.itemId)
+    if (!item) return false
+    if (selectedCue.kind === 'subtitle' && isSubtitleStreamItem(item)) {
+      updateProject({
+        ...project,
+        timeline: project.timeline.map((entry) =>
+          entry.id === item.id ? { ...entry, subtitleCues: normalizeSubtitleCues(item.subtitleCues, item.durationFrames).filter((cue) => cue.id !== selectedCue.cueId) } : entry
+        )
+      })
+      setSelectedCue(null)
+      setNotice('已删除字幕 cue')
+      return true
+    }
+    if (selectedCue.kind === 'role' && isRoleInstanceItem(item)) {
+      updateProject({
+        ...project,
+        timeline: project.timeline.map((entry) =>
+          entry.id === item.id ? { ...entry, roleStates: normalizeRoleStates(item.roleStates, item.durationFrames).filter((state) => state.id !== selectedCue.cueId) } : entry
+        )
+      })
+      setSelectedCue(null)
+      setNotice('已删除角色状态 cue')
+      return true
+    }
+    return false
   }
 
   function openItemContextMenu(itemId: string, clientX: number, clientY: number): void {
@@ -1855,6 +2238,17 @@ function App(): JSX.Element {
       y: contextMenu?.y || window.innerHeight / 2,
       value: item.text || ''
     })
+  }
+
+  function roleForTimelineItem(item: TimelineItem): CharacterRole | undefined {
+    if (!project) return undefined
+    const roles = projectRoles(project)
+    if (item.roleId) {
+      const role = roles.find((entry) => entry.id === item.roleId)
+      if (role) return role
+    }
+    const track = project.tracks.find((entry) => entry.id === item.trackId)
+    return track && track.kind === 'visual' && trackGroupId(track) === 'role' ? roleForTrack(project, track, roles) : undefined
   }
 
   function flipContextItem(item: TimelineItem): void {
@@ -1919,7 +2313,13 @@ function App(): JSX.Element {
         setNotice('已绑定角色名称')
       }
     } else {
-      upsertContextSubtitle(contextInputItem, { text: value, style: project.subtitleStyle })
+      const role = contextInputItem.type === 'visual' ? roleForTimelineItem(contextInputItem) : undefined
+      if (role) {
+        const startFrame = clampNumber(playheadFrame, contextInputItem.startFrame, Math.max(contextInputItem.startFrame, contextInputItem.startFrame + contextInputItem.durationFrames - 1))
+        placeRoleLineAtFrame(role, value, startFrame, lineDurationFrames(value, currentPreset?.fps || 30))
+      } else {
+        upsertContextSubtitle(contextInputItem, { text: value, style: project.subtitleStyle })
+      }
     }
     setContextInput(null)
   }
@@ -1954,6 +2354,7 @@ function App(): JSX.Element {
 
   function selectTimelineItem(itemId: string | null): void {
     setSelectedItemId(itemId)
+    setSelectedCue(null)
     setSelectedKeyframe(null)
     const item = itemId ? project?.timeline.find((entry) => entry.id === itemId) : null
     if (item) setSelectedTrackId(item.trackId)
@@ -1961,7 +2362,19 @@ function App(): JSX.Element {
 
   function selectTrack(trackId: string, clearItem = true): void {
     setSelectedTrackId(trackId)
-    if (clearItem) setSelectedItemId(null)
+    if (clearItem) {
+      setSelectedItemId(null)
+      setSelectedCue(null)
+    }
+  }
+
+  function selectTimelineCue(itemId: string, cueId: string, kind: SelectedCueRef['kind'], absoluteFrame?: number): void {
+    setSelectedItemId(itemId)
+    setSelectedCue({ itemId, cueId, kind })
+    setSelectedKeyframe(null)
+    const item = project?.timeline.find((entry) => entry.id === itemId)
+    if (item) setSelectedTrackId(item.trackId)
+    if (typeof absoluteFrame === 'number') setPlayheadFrame(clampNumber(absoluteFrame, 0, totalFrames))
   }
 
   function changeActiveTrackGroup(group: TrackGroupFilter): void {
@@ -2019,6 +2432,15 @@ function App(): JSX.Element {
 
   function reconcileProjectSelection(nextProject: ProjectFile): void {
     setSelectedItemId((current) => (current && nextProject.timeline.some((item) => item.id === current) ? current : null))
+    setSelectedCue((current) => {
+      if (!current) return null
+      const item = nextProject.timeline.find((entry) => entry.id === current.itemId)
+      const cueExists =
+        current.kind === 'subtitle'
+          ? Boolean(item && isSubtitleStreamItem(item) && normalizeSubtitleCues(item.subtitleCues, item.durationFrames).some((cue) => cue.id === current.cueId))
+          : Boolean(item && isRoleInstanceItem(item) && normalizeRoleStates(item.roleStates, item.durationFrames).some((state) => state.id === current.cueId))
+      return cueExists ? current : null
+    })
     setSelectedTrackId((current) =>
       current && nextProject.tracks.some((track) => track.id === current) ? current : nextProject.tracks[0]?.id || null
     )
@@ -2189,9 +2611,11 @@ function App(): JSX.Element {
           onImport={importLocalAssets}
           onPreprocessGreen={() => preprocessFilteredGreenScreenAssets(false)}
           onPreprocessGreenForce={() => preprocessFilteredGreenScreenAssets(true)}
+          onCleanupGreen={cleanupGreenCache}
           preprocessProgress={preprocessProgress}
           onAdd={addAssetToTimeline}
           onAddToPurpose={addAssetToPurpose}
+          onToggleFavorite={toggleAssetFavorite}
           onShowFile={(asset) => window.catMeme.showItem(asset.localPath)}
         />
 
@@ -2330,6 +2754,7 @@ function App(): JSX.Element {
             totalFrames={totalFrames}
             fps={currentPreset.fps}
             selectedItemId={selectedItemId}
+            selectedCue={selectedCue}
             selectedKeyframe={selectedKeyframe}
             playheadFrame={playheadFrame}
             activeGroup={activeTrackGroup}
@@ -2343,6 +2768,10 @@ function App(): JSX.Element {
             onPatchItem={moveTimelineItem}
             onPatchTrack={patchTrack}
             onPatchGroup={patchTrackGroup}
+            onSelectCue={selectTimelineCue}
+            onMoveCueToTrack={moveCueToTrack}
+            onCreateSubtitleStream={createSubtitleStreamOnTrack}
+            onCreateRoleStream={createRoleStreamOnTrack}
             onAddTrack={(groupId, kind) => addTrackForGroup(groupId, kind)}
             onDeleteTrack={deleteTrack}
             onReorderTrack={reorderTrack}
@@ -2377,11 +2806,16 @@ function App(): JSX.Element {
             fps={currentPreset.fps}
             selectedTrack={selectedTrack}
             selectedItem={selectedItem}
+            selectedCue={selectedCue}
             selectedKeyframe={selectedKeyframe}
             playheadFrame={playheadFrame}
             lastExport={lastExport}
+            availableAssets={mergeAssets(project.assets, localAssets)}
             onPatchTrack={patchTrack}
             onPatchItem={updateSelectedItem}
+            onCreateSubtitleStream={createSubtitleStreamOnTrack}
+            onSelectCue={selectTimelineCue}
+            onAddRoleCue={addRoleCueFromInspector}
             onProjectDurationChange={setProjectDurationSeconds}
             onSelectKeyframe={selectVisualKeyframe}
             onSeek={setPlayheadFrame}
@@ -2400,10 +2834,12 @@ function App(): JSX.Element {
               settings={settings}
               workspace={workspace}
               lastExport={lastExport}
+              lastCover={lastCover}
               onChangeCustomPreset={updateCustomPreset}
               onChooseExportDir={() => void chooseExportDir()}
               onPreview={() => void render('preview')}
               onExport={() => void render('export')}
+              onExportCover={() => void render('cover')}
               onExportAs={() => void exportAs()}
             />
           ) : (
@@ -2487,9 +2923,11 @@ function AssetLibraryPanel({
   onImport,
   onPreprocessGreen,
   onPreprocessGreenForce,
+  onCleanupGreen,
   preprocessProgress,
   onAdd,
   onAddToPurpose,
+  onToggleFavorite,
   onShowFile
 }: {
   localAssets: Asset[]
@@ -2510,9 +2948,11 @@ function AssetLibraryPanel({
   onImport: () => Promise<void>
   onPreprocessGreen: () => Promise<void>
   onPreprocessGreenForce: () => Promise<void>
+  onCleanupGreen: () => Promise<void>
   preprocessProgress: GreenScreenPreprocessProgress | null
   onAdd: (asset: Asset, trackKind?: TrackKind) => void
   onAddToPurpose: (asset: Asset, purpose: 'background' | 'role' | 'audio') => void
+  onToggleFavorite: (asset: Asset) => void
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const subcategories = ASSET_SUBCATEGORIES[primaryCategory] || ASSET_SUBCATEGORIES.all
@@ -2578,6 +3018,9 @@ function AssetLibraryPanel({
             <button className="mini-link" disabled={preprocessing} onClick={onPreprocessGreenForce}>
               重新生成
             </button>
+            <button className="mini-link" disabled={preprocessing} onClick={onCleanupGreen}>
+              清理无引用
+            </button>
             {preprocessProgress && <small>{preprocessProgress.current}/{preprocessProgress.total}</small>}
           </div>
         )}
@@ -2618,6 +3061,7 @@ function AssetLibraryPanel({
             viewMode={viewMode}
             onAdd={onAdd}
             onAddToPurpose={onAddToPurpose}
+            onToggleFavorite={onToggleFavorite}
             onShowFile={onShowFile}
           />
         </div>
@@ -2631,12 +3075,14 @@ function AssetGrid({
   viewMode,
   onAdd,
   onAddToPurpose,
+  onToggleFavorite,
   onShowFile
 }: {
   assets: Asset[]
   viewMode: AssetViewMode
   onAdd: (asset: Asset, trackKind?: TrackKind) => void
   onAddToPurpose: (asset: Asset, purpose: 'background' | 'role' | 'audio') => void
+  onToggleFavorite: (asset: Asset) => void
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const [page, setPage] = useState(0)
@@ -2660,6 +3106,7 @@ function AssetGrid({
             viewMode={viewMode}
             onAdd={onAdd}
             onAddToPurpose={onAddToPurpose}
+            onToggleFavorite={onToggleFavorite}
             onShowFile={onShowFile}
           />
         ))}
@@ -2776,12 +3223,14 @@ function LocalAssetCard({
   viewMode,
   onAdd,
   onAddToPurpose,
+  onToggleFavorite,
   onShowFile
 }: {
   asset: Asset
   viewMode: AssetViewMode
   onAdd: (asset: Asset, trackKind?: TrackKind) => void
   onAddToPurpose: (asset: Asset, purpose: 'background' | 'role' | 'audio') => void
+  onToggleFavorite: (asset: Asset) => void
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const isAudio = asset.type === 'audio'
@@ -2811,6 +3260,17 @@ function LocalAssetCard({
     >
       <div className="asset-thumb-wrap">
         <MemoAssetThumbnail asset={asset} active={previewActive} />
+        <button
+          type="button"
+          className={asset.favorite ? 'asset-favorite active' : 'asset-favorite'}
+          title={asset.favorite ? '取消收藏' : '收藏素材'}
+          onClick={(event) => {
+            event.stopPropagation()
+            onToggleFavorite(asset)
+          }}
+        >
+          <Star size={15} fill={asset.favorite ? 'currentColor' : 'none'} />
+        </button>
       </div>
       <div className="asset-meta">
         <strong>{asset.title || asset.filename}</strong>
@@ -3433,6 +3893,8 @@ function QuickPreview({
 }): JSX.Element {
   const wheelTarget = items.find((item) => item.id === selectedItemId) || items[items.length - 1]
   const stageStyle = previewStageStyle(presetWidth, presetHeight)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const [displayScale, setDisplayScale] = useState(() => fallbackPreviewDisplayScale(presetWidth, presetHeight))
   const selectedVisualItem = items.find((item) => item.id === selectedItemId) || null
   const selectedSubtitleItem = subtitles.find((item) => item.id === selectedItemId) || null
   const selectedTransform = selectedVisualItem
@@ -3448,6 +3910,26 @@ function QuickPreview({
     }
   }, [])
 
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+
+    const updateScale = (): void => {
+      const bounds = stage.getBoundingClientRect()
+      const nextScale = previewDisplayScaleForStage(bounds.width, bounds.height, presetWidth, presetHeight)
+      setDisplayScale((current) => (Math.abs(current - nextScale) > 0.001 ? nextScale : current))
+    }
+
+    updateScale()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateScale)
+    observer?.observe(stage)
+    window.addEventListener('resize', updateScale)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateScale)
+    }
+  }, [presetHeight, presetWidth])
+
   function handleDrop(event: DragEvent<HTMLDivElement>): void {
     event.preventDefault()
     const assetId = event.dataTransfer.getData('application/x-cat-meme-asset') || event.dataTransfer.getData('text/plain')
@@ -3456,6 +3938,7 @@ function QuickPreview({
 
   return (
     <div
+      ref={stageRef}
       className="quick-preview-stage"
       style={stageStyle}
       onDragOver={(event) => {
@@ -3525,6 +4008,7 @@ function QuickPreview({
             fps={fps}
             presetWidth={presetWidth}
             presetHeight={presetHeight}
+            displayScale={displayScale}
             isPlaying={isPlaying}
             playbackRate={playbackRate}
             activeTool={activeTool}
@@ -3545,6 +4029,7 @@ function QuickPreview({
           activeTool={activeTool}
           presetWidth={presetWidth}
           presetHeight={presetHeight}
+          displayScale={displayScale}
           onSelect={onSelect}
           onPatchItem={onPatchItem}
           onItemContextMenu={onItemContextMenu}
@@ -3561,6 +4046,7 @@ function QuickPreviewTextLayer({
   activeTool,
   presetWidth,
   presetHeight,
+  displayScale,
   onSelect,
   onPatchItem,
   onItemContextMenu
@@ -3571,6 +4057,7 @@ function QuickPreviewTextLayer({
   activeTool: EditorToolId
   presetWidth: number
   presetHeight: number
+  displayScale: number
   onSelect: (id: string) => void
   onPatchItem: PatchTimelineItem
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
@@ -3749,7 +4236,9 @@ function QuickPreviewTextLayer({
               onItemContextMenu(item.id, event.clientX, event.clientY)
             }}
           >
-            <div className={`preview-speaker speaker-${item.speakerPosition || subtitleStyle.position}`}>{item.speakerName}</div>
+            <div className={`preview-speaker speaker-${item.speakerPosition || subtitleStyle.position}`} style={previewSpeakerCss(subtitleStyle, displayScale)}>
+              {item.speakerName}
+            </div>
             {!hasText && renderHandles()}
           </div>
         </div>
@@ -3765,7 +4254,7 @@ function QuickPreviewTextLayer({
               onItemContextMenu(item.id, event.clientX, event.clientY)
             }}
           >
-            <div className={`preview-subtitle subtitle-${subtitleStyle.position}`} style={previewSubtitleCss(subtitleStyle, subtitleBox)}>
+            <div className={`preview-subtitle subtitle-${subtitleStyle.position}`} style={previewSubtitleCss(subtitleStyle, subtitleBox, displayScale)}>
               {item.text}
             </div>
             {renderHandles()}
@@ -3786,6 +4275,7 @@ function QuickPreviewLayer({
   fps,
   presetWidth,
   presetHeight,
+  displayScale,
   isPlaying,
   playbackRate,
   activeTool,
@@ -3803,6 +4293,7 @@ function QuickPreviewLayer({
   fps: number
   presetWidth: number
   presetHeight: number
+  displayScale: number
   isPlaying: boolean
   playbackRate: number
   activeTool: EditorToolId
@@ -4053,7 +4544,7 @@ function QuickPreviewLayer({
             onItemContextMenu(item.id, event.clientX, event.clientY)
           }}
         >
-          <span style={previewRoleLabelCss(roleLabel.style, effectState.transform)}>{roleLabel.text}</span>
+          <span style={previewRoleLabelCss(roleLabel.style, effectState.transform, displayScale)}>{roleLabel.text}</span>
         </div>
       )}
       <div
@@ -4129,7 +4620,21 @@ function PreviewAudioBridge({
       {allItems.map((item) => {
         const asset = item.assetId ? project.assets.find((asset) => asset.id === item.assetId) : null
         if (!asset?.fileUrl) return null
-        return <PreviewAudioElement key={item.id} item={item} asset={asset} playheadFrame={playheadFrame} fps={fps} isPlaying={isPlaying} playbackRate={playbackRate} />
+        const ducked =
+          item.type === 'music' &&
+          allItems.some((other) => other.id !== item.id && other.type !== 'music' && playheadFrame >= other.startFrame && playheadFrame < other.startFrame + other.durationFrames)
+        return (
+          <PreviewAudioElement
+            key={item.id}
+            item={item}
+            asset={asset}
+            playheadFrame={playheadFrame}
+            fps={fps}
+            isPlaying={isPlaying}
+            playbackRate={playbackRate}
+            ducked={ducked}
+          />
+        )
       })}
     </>
   )
@@ -4141,7 +4646,8 @@ function PreviewAudioElement({
   playheadFrame,
   fps,
   isPlaying,
-  playbackRate
+  playbackRate,
+  ducked
 }: {
   item: TimelineItem
   asset: Asset
@@ -4149,6 +4655,7 @@ function PreviewAudioElement({
   fps: number
   isPlaying: boolean
   playbackRate: number
+  ducked: boolean
 }): JSX.Element {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentSeconds = mediaPlaybackSeconds(item, asset, playheadFrame - item.startFrame, fps)
@@ -4156,7 +4663,9 @@ function PreviewAudioElement({
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
-    audio.volume = clampNumber(item.volume ?? (item.type === 'music' ? 0.35 : 1), 0, 1)
+    const fade = audioFadeMultiplier(item, playheadFrame)
+    const duck = ducked ? 0.35 : 1
+    audio.volume = clampNumber((item.volume ?? (item.type === 'music' ? 0.35 : 1)) * fade * duck, 0, 1)
     audio.playbackRate = clampNumber(playbackRate * mediaPlaybackRateForAsset(item, asset), 0.125, 8)
     if (Math.abs(audio.currentTime - currentSeconds) > 0.35) {
       audio.currentTime = currentSeconds
@@ -4166,7 +4675,7 @@ function PreviewAudioElement({
     } else {
       audio.pause()
     }
-  }, [asset, currentSeconds, isPlaying, item, playbackRate])
+  }, [asset, currentSeconds, ducked, isPlaying, item, playbackRate, playheadFrame])
 
   return <audio ref={audioRef} src={asset.fileUrl} preload="auto" />
 }
@@ -4378,11 +4887,16 @@ function PropertyInspector({
   fps,
   selectedTrack,
   selectedItem,
+  selectedCue,
   selectedKeyframe,
   playheadFrame,
   lastExport,
+  availableAssets,
   onPatchTrack,
   onPatchItem,
+  onCreateSubtitleStream,
+  onSelectCue,
+  onAddRoleCue,
   onProjectDurationChange,
   onSelectKeyframe,
   onSeek,
@@ -4395,11 +4909,16 @@ function PropertyInspector({
   fps: number
   selectedTrack: TimelineTrack | null
   selectedItem: TimelineItem | null
+  selectedCue: SelectedCueRef | null
   selectedKeyframe: { itemId: string; keyframeId: string } | null
   playheadFrame: number
   lastExport: RenderResult | null
+  availableAssets: Asset[]
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
   onPatchItem: (patch: Partial<TimelineItem>) => void
+  onCreateSubtitleStream: (trackId: string) => void
+  onSelectCue: (itemId: string, cueId: string, kind: SelectedCueRef['kind'], absoluteFrame?: number) => void
+  onAddRoleCue: (itemId: string, assetId: string, replaceCueId?: string) => void
   onProjectDurationChange: (seconds: number) => void
   onSelectKeyframe: (itemId: string, keyframeId: string, absoluteFrame: number) => void
   onSeek: (frame: number) => void
@@ -4408,7 +4927,7 @@ function PropertyInspector({
 }): JSX.Element {
   return (
     <div className="property-inspector">
-      <TrackInspector project={project} track={selectedTrack} onPatchTrack={onPatchTrack} />
+      <TrackInspector project={project} track={selectedTrack} onPatchTrack={onPatchTrack} onCreateSubtitleStream={onCreateSubtitleStream} />
       <div className="property-section">
         {selectedItem ? (
           <SelectedInspector
@@ -4416,8 +4935,12 @@ function PropertyInspector({
             item={selectedItem}
             fps={fps}
             playheadFrame={playheadFrame}
+            selectedCue={selectedCue?.itemId === selectedItem.id ? selectedCue : null}
             selectedKeyframeId={selectedKeyframe?.itemId === selectedItem.id ? selectedKeyframe.keyframeId : null}
+            availableAssets={availableAssets}
             onPatch={onPatchItem}
+            onSelectCue={(cueId, kind, frame) => onSelectCue(selectedItem.id, cueId, kind, frame)}
+            onAddRoleCue={(assetId, replaceCueId) => onAddRoleCue(selectedItem.id, assetId, replaceCueId)}
             onSelectKeyframe={(keyframeId, frame) => onSelectKeyframe(selectedItem.id, keyframeId, selectedItem.startFrame + frame)}
             onSeek={onSeek}
             onSplit={onSplit}
@@ -4434,11 +4957,13 @@ function PropertyInspector({
 function TrackInspector({
   project,
   track,
-  onPatchTrack
+  onPatchTrack,
+  onCreateSubtitleStream
 }: {
   project: ProjectFile
   track: TimelineTrack | null
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
+  onCreateSubtitleStream: (trackId: string) => void
 }): JSX.Element {
   if (!track) {
     return (
@@ -4454,6 +4979,7 @@ function TrackInspector({
   const itemCount = project.timeline.filter((item) => item.trackId === track.id && isTimelineCountItem(item)).length
   const outputLabel = track.kind === 'visual' || track.kind === 'subtitle' ? '画面输出' : '声音输出'
   const groupOptions = TRACK_GROUPS.filter((option) => canMoveTrackToGroup(track, option.id))
+  const hasSubtitleStream = track.kind === 'subtitle' && project.timeline.some((item) => item.trackId === track.id && isSubtitleStreamItem(item))
 
   return (
     <section className="inspector track-inspector">
@@ -4495,6 +5021,12 @@ function TrackInspector({
         <Metric label={outputLabel} value={track.muted ? '关闭' : '开启'} />
       </div>
       <p className="muted small-note">下方视觉轨会盖在上方。</p>
+      {track.kind === 'subtitle' && !hasSubtitleStream && (
+        <button className="command ghost wide" onClick={() => onCreateSubtitleStream(track.id)}>
+          <Plus size={15} />
+          创建字幕流
+        </button>
+      )}
     </section>
   )
 }
@@ -4504,8 +5036,12 @@ function SelectedInspector({
   item,
   fps,
   playheadFrame,
+  selectedCue,
   selectedKeyframeId,
+  availableAssets,
   onPatch,
+  onSelectCue,
+  onAddRoleCue,
   onSelectKeyframe,
   onSeek,
   onSplit,
@@ -4515,8 +5051,12 @@ function SelectedInspector({
   item: TimelineItem | null
   fps: number
   playheadFrame: number
+  selectedCue: SelectedCueRef | null
   selectedKeyframeId: string | null
+  availableAssets: Asset[]
   onPatch: (patch: Partial<TimelineItem>) => void
+  onSelectCue: (cueId: string, kind: SelectedCueRef['kind'], absoluteFrame?: number) => void
+  onAddRoleCue: (assetId: string, replaceCueId?: string) => void
   onSelectKeyframe: (keyframeId: string, frame: number) => void
   onSeek: (frame: number) => void
   onSplit: () => void
@@ -4532,6 +5072,8 @@ function SelectedInspector({
   }
   const effect = item.effects[0] || DEFAULT_EFFECTS[0]
   const canRateStretch = isRateStretchItem(item, project.assets)
+  const itemAsset = item.assetId ? project.assets.find((asset) => asset.id === item.assetId) || null : null
+  const hasAudioControls = Boolean(itemAsset && canUseAsAudioAsset(itemAsset))
   const effectDisabled = effect.type === 'none'
   const patchEffectIntensity = (value: number): void => {
     const intensity = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
@@ -4569,16 +5111,17 @@ function SelectedInspector({
           {item.loop ? '循环播放已开启' : '循环播放关闭'}
         </button>
       )}
+      {hasAudioControls && itemAsset && <AudioDetailInspector item={item} asset={itemAsset} fps={fps} onPatch={onPatch} />}
       {item.type === 'subtitle' && (
         isSubtitleStreamItem(item) ? (
-          <SubtitleStreamInspector project={project} item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} />
+          <SubtitleStreamInspector project={project} item={item} fps={fps} playheadFrame={playheadFrame} selectedCueId={selectedCue?.kind === 'subtitle' ? selectedCue.cueId : null} onSelectCue={(cueId, frame) => onSelectCue(cueId, 'subtitle', frame)} onPatch={onPatch} />
         ) : (
           <DialogueInspector item={item} onPatch={onPatch} />
         )
       )}
       {item.type === 'visual' && (
         <>
-          {isRoleInstanceItem(item) && <RoleInstanceInspector project={project} item={item} fps={fps} playheadFrame={playheadFrame} onPatch={onPatch} />}
+          {isRoleInstanceItem(item) && <RoleInstanceInspector project={project} item={item} availableAssets={availableAssets} fps={fps} playheadFrame={playheadFrame} selectedCueId={selectedCue?.kind === 'role' ? selectedCue.cueId : null} onSelectCue={(cueId, frame) => onSelectCue(cueId, 'role', frame)} onAddRoleCue={onAddRoleCue} onPatch={onPatch} />}
           <div className="effect-editor">
             <div className="effect-header">
               <label className="field compact">
@@ -4661,6 +5204,73 @@ function SelectedInspector({
   )
 }
 
+function AudioDetailInspector({
+  item,
+  asset,
+  fps,
+  onPatch
+}: {
+  item: TimelineItem
+  asset: Asset
+  fps: number
+  onPatch: (patch: Partial<TimelineItem>) => void
+}): JSX.Element {
+  const [waveform, setWaveform] = useState<WaveformData | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setWaveform(null)
+    void window.catMeme.getAssetWaveform(asset.id).then((data) => {
+      if (!cancelled) setWaveform(data)
+    }).catch(() => {
+      if (!cancelled) setWaveform(emptyWaveformData(asset.id))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [asset.id])
+
+  const peakPercent = Math.round((waveform?.peak || 0) * 100)
+  const meanPercent = Math.round((waveform?.mean || 0) * 100)
+
+  return (
+    <div className="audio-detail-card">
+      <div className="audio-detail-head">
+        <strong>音频精修</strong>
+        <span>{peakPercent ? `峰值 ${peakPercent}% · 均值 ${meanPercent}%` : '等待波形'}</span>
+      </div>
+      <WaveformPreview waveform={waveform} />
+      <div className="number-grid">
+        <NumberField label="淡入帧" value={item.fadeInFrames || 0} onChange={(value) => onPatch({ fadeInFrames: Math.max(0, value) })} />
+        <NumberField label="淡出帧" value={item.fadeOutFrames || 0} onChange={(value) => onPatch({ fadeOutFrames: Math.max(0, value) })} />
+      </div>
+      <InspectorHint>
+        {item.type === 'music'
+          ? 'BGM 遇到配音、音效或视频原声时会在预览和导出中自动压低到 35%。'
+          : `淡入淡出会按 ${fps}fps 同步到预览和导出。`}
+      </InspectorHint>
+    </div>
+  )
+}
+
+function WaveformPreview({ waveform }: { waveform: WaveformData | null }): JSX.Element {
+  const samples = waveform?.samples || []
+  if (!samples.length) {
+    return (
+      <div className="waveform-preview empty">
+        <span />
+      </div>
+    )
+  }
+  return (
+    <div className="waveform-preview" title="音频波形">
+      {samples.map((sample, index) => (
+        <span key={index} style={{ height: `${Math.max(8, Math.round(sample * 100))}%` }} />
+      ))}
+    </div>
+  )
+}
+
 function ProjectOverviewInspector({
   project,
   preset,
@@ -4733,6 +5343,7 @@ function Timeline({
   totalFrames,
   fps,
   selectedItemId,
+  selectedCue,
   selectedKeyframe,
   selectedTrackId,
   playheadFrame,
@@ -4746,6 +5357,10 @@ function Timeline({
   onPatchItem,
   onPatchTrack,
   onPatchGroup,
+  onSelectCue,
+  onMoveCueToTrack,
+  onCreateSubtitleStream,
+  onCreateRoleStream,
   onAddTrack,
   onDeleteTrack,
   onReorderTrack,
@@ -4769,6 +5384,7 @@ function Timeline({
   totalFrames: number
   fps: number
   selectedItemId: string | null
+  selectedCue: SelectedCueRef | null
   selectedKeyframe: { itemId: string; keyframeId: string } | null
   selectedTrackId: string | null
   playheadFrame: number
@@ -4782,6 +5398,10 @@ function Timeline({
   onPatchItem: PatchTimelineItem
   onPatchTrack: (trackId: string, patch: Partial<TimelineTrack>) => void
   onPatchGroup: (groupId: TrackGroupId, patch: Partial<TimelineTrack>) => void
+  onSelectCue: (itemId: string, cueId: string, kind: SelectedCueRef['kind'], absoluteFrame?: number) => void
+  onMoveCueToTrack: (args: { itemId: string; cueId: string; kind: 'subtitle' | 'role'; targetTrackId: string; absoluteFrame: number }) => boolean
+  onCreateSubtitleStream: (trackId: string) => void
+  onCreateRoleStream: (trackId: string) => TimelineItem | null
   onAddTrack: (groupId?: TrackGroupId, kind?: TrackKind) => void
   onDeleteTrack: (trackId: string) => void
   onReorderTrack: (sourceTrackId: string, targetTrackId: string, placement: 'before' | 'after') => void
@@ -4828,6 +5448,16 @@ function Timeline({
     laneWidth: number
     mergeKey: string
   } | null>(null)
+  const [cueDropPreview, setCueDropPreview] = useState<{
+    kind: 'subtitle' | 'role'
+    itemId: string
+    cueId: string
+    trackId: string
+    frame: number
+    durationFrames: number
+    valid: boolean
+  } | null>(null)
+  const cueDropPreviewRef = useRef<typeof cueDropPreview>(null)
   const [durationDrag, setDurationDrag] = useState<{ startX: number; startFrames: number; laneWidth: number } | null>(null)
   const [trackDropTarget, setTrackDropTarget] = useState<string | null>(null)
   const [assetDropPreview, setAssetDropPreview] = useState<{
@@ -4995,17 +5625,18 @@ function Timeline({
     let animationFrame: number | null = null
     let pendingPatch: Partial<TimelineItem> | null = null
 
-    function cuePatch(deltaFrames: number): Partial<TimelineItem> {
-      const nextStart =
+    function cuePatch(deltaFrames: number, event: globalThis.PointerEvent): Partial<TimelineItem> {
+      const rawStart =
         activeDrag.mode === 'move' || activeDrag.mode === 'start'
           ? clampNumber(activeDrag.startFrame + deltaFrames, 0, Math.max(0, activeDrag.item.durationFrames - 1))
           : activeDrag.startFrame
-      const nextDuration =
+      const rawDuration =
         activeDrag.mode === 'start'
-          ? Math.max(1, activeDrag.startFrame + activeDrag.durationFrames - nextStart)
+          ? Math.max(1, activeDrag.startFrame + activeDrag.durationFrames - rawStart)
           : activeDrag.mode === 'end'
             ? Math.max(1, activeDrag.durationFrames + deltaFrames)
             : activeDrag.durationFrames
+      const { startFrame: nextStart, durationFrames: nextDuration } = snapCueDragPatch(activeDrag, rawStart, rawDuration, event)
       if (activeDrag.kind === 'subtitle') {
         const cues = normalizeSubtitleCues(activeDrag.item.subtitleCues, activeDrag.item.durationFrames).map((cue) =>
           cue.id === activeDrag.cueId ? { ...cue, startFrame: nextStart, durationFrames: Math.min(nextDuration, activeDrag.item.durationFrames - nextStart) } : cue
@@ -5032,15 +5663,56 @@ function Timeline({
 
     function onPointerMove(event: globalThis.PointerEvent): void {
       const deltaFrames = Math.round(((event.clientX - activeDrag.startX) / Math.max(1, activeDrag.laneWidth)) * totalFrames)
-      schedulePatch(cuePatch(deltaFrames))
+      if (activeDrag.mode === 'move') {
+        const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-track-id]')
+        const targetTrackId = lane?.dataset.trackId
+        const targetTrack = targetTrackId ? projectRef.current.tracks.find((track) => track.id === targetTrackId) : undefined
+        const targetAcceptsCue =
+          targetTrack &&
+          !targetTrack.locked &&
+          targetTrack.id !== activeDrag.item.trackId &&
+          (activeDrag.kind === 'subtitle'
+            ? targetTrack.kind === 'subtitle'
+            : targetTrack.kind === 'visual' && trackGroupId(targetTrack) === 'role')
+        if (targetAcceptsCue) {
+          const nextStart = clampNumber(activeDrag.startFrame + deltaFrames, 0, Math.max(0, activeDrag.item.durationFrames - activeDrag.durationFrames))
+          const preview = {
+            kind: activeDrag.kind,
+            itemId: activeDrag.item.id,
+            cueId: activeDrag.cueId,
+            trackId: targetTrack.id,
+            frame: activeDrag.item.startFrame + nextStart,
+            durationFrames: activeDrag.durationFrames,
+            valid: true
+          }
+          cueDropPreviewRef.current = preview
+          setCueDropPreview(preview)
+          return
+        }
+      }
+      cueDropPreviewRef.current = null
+      setCueDropPreview(null)
+      schedulePatch(cuePatch(deltaFrames, event))
     }
 
     function onPointerUp(): void {
+      const dropPreview = cueDropPreviewRef.current
       if (animationFrame !== null) {
         window.cancelAnimationFrame(animationFrame)
-        flushPatch()
+        if (!dropPreview?.valid) flushPatch()
+      }
+      if (dropPreview?.valid) {
+        onMoveCueToTrack({
+          itemId: activeDrag.item.id,
+          cueId: activeDrag.cueId,
+          kind: activeDrag.kind,
+          targetTrackId: dropPreview.trackId,
+          absoluteFrame: dropPreview.frame
+        })
       }
       setCueDrag(null)
+      cueDropPreviewRef.current = null
+      setCueDropPreview(null)
     }
 
     window.addEventListener('pointermove', onPointerMove)
@@ -5050,7 +5722,7 @@ function Timeline({
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
     }
-  }, [cueDrag, totalFrames])
+  }, [cueDrag, onMoveCueToTrack, totalFrames])
 
   useEffect(() => {
     if (!durationDrag) return
@@ -5292,7 +5964,100 @@ function Timeline({
       mergeKey: `timeline-cue-${item.id}-${cue.id}-${mode}-${crypto.randomUUID()}`
     })
     onSelect(item.id)
+    onSelectCue(item.id, cue.id, kind, item.startFrame + cue.startFrame)
     onSeek(item.startFrame + cue.startFrame)
+  }
+
+  function cueEntriesForItem(item: TimelineItem): Array<{ id: string; startFrame: number; durationFrames: number }> {
+    if (isSubtitleStreamItem(item)) return normalizeSubtitleCues(item.subtitleCues, item.durationFrames)
+    if (isRoleInstanceItem(item)) return normalizeRoleStates(item.roleStates, item.durationFrames)
+    return []
+  }
+
+  function snapCueDragPatch(
+    activeDrag: NonNullable<typeof cueDrag>,
+    rawStartFrame: number,
+    rawDurationFrames: number,
+    event: globalThis.PointerEvent
+  ): { startFrame: number; durationFrames: number } {
+    let startFrame = clampNumber(Math.round(rawStartFrame), 0, Math.max(0, activeDrag.item.durationFrames - 1))
+    let durationFrames = clampNumber(Math.round(rawDurationFrames), 1, Math.max(1, activeDrag.item.durationFrames - startFrame))
+    if (!snapEnabled || event.altKey) return { startFrame, durationFrames }
+
+    const entries = cueEntriesForItem(activeDrag.item).filter((entry) => entry.id !== activeDrag.cueId)
+    const threshold = Math.max(
+      snapThresholdFrames(activeDrag.laneWidth, totalFrames, fps),
+      event.shiftKey && activeDrag.mode === 'move' ? Math.round(fps * 0.18) : 0
+    )
+
+    if (activeDrag.mode === 'move' && event.shiftKey) {
+      const stickyStarts = entries.flatMap((entry) => [entry.startFrame + entry.durationFrames, entry.startFrame - durationFrames])
+      const snappedStart = nearestCueSnap(startFrame, stickyStarts, threshold)
+      return {
+        startFrame: clampNumber(snappedStart ?? startFrame, 0, Math.max(0, activeDrag.item.durationFrames - durationFrames)),
+        durationFrames
+      }
+    }
+
+    const localPlayhead = clampNumber(playheadFrame - activeDrag.item.startFrame, 0, activeDrag.item.durationFrames)
+    const candidates = uniqueNumbers([
+      0,
+      activeDrag.item.durationFrames,
+      localPlayhead,
+      ...rulerTicks
+        .map((tick) => tick.frame - activeDrag.item.startFrame)
+        .filter((frame) => frame >= 0 && frame <= activeDrag.item.durationFrames),
+      ...entries.flatMap((entry) => [entry.startFrame, entry.startFrame + entry.durationFrames])
+    ])
+
+    if (activeDrag.mode === 'start') {
+      startFrame = nearestCueSnap(startFrame, candidates, threshold) ?? startFrame
+      durationFrames = clampNumber(activeDrag.startFrame + activeDrag.durationFrames - startFrame, 1, Math.max(1, activeDrag.item.durationFrames - startFrame))
+    } else if (activeDrag.mode === 'end') {
+      const snappedEnd = nearestCueSnap(startFrame + durationFrames, candidates, threshold)
+      if (typeof snappedEnd === 'number') durationFrames = Math.max(1, snappedEnd - startFrame)
+      durationFrames = clampNumber(durationFrames, 1, Math.max(1, activeDrag.item.durationFrames - startFrame))
+    } else {
+      const snapStarts = candidates
+      const snapEnds = candidates.map((frame) => frame - durationFrames)
+      startFrame = nearestCueSnap(startFrame, [...snapStarts, ...snapEnds], threshold) ?? startFrame
+      startFrame = clampNumber(startFrame, 0, Math.max(0, activeDrag.item.durationFrames - durationFrames))
+    }
+
+    return { startFrame, durationFrames }
+  }
+
+  function nearestCueSnap(value: number, candidates: number[], threshold: number): number | null {
+    let winner: number | null = null
+    let distance = threshold + 1
+    candidates.forEach((candidate) => {
+      const nextDistance = Math.abs(candidate - value)
+      if (nextDistance <= threshold && nextDistance < distance) {
+        winner = Math.round(candidate)
+        distance = nextDistance
+      }
+    })
+    return winner
+  }
+
+  function fillRoleStateGap(item: TimelineItem, gap: { startFrame: number; durationFrames: number }): void {
+    const states = normalizeRoleStates(item.roleStates, item.durationFrames)
+    if (!states.length) return
+    const gapEnd = gap.startFrame + gap.durationFrames
+    const previous = [...states].reverse().find((state) => state.startFrame + state.durationFrames <= gap.startFrame)
+    const next = states.find((state) => state.startFrame >= gapEnd)
+    let nextStates = states
+    if (previous) {
+      nextStates = states.map((state) =>
+        state.id === previous.id ? { ...state, durationFrames: gapEnd - state.startFrame } : state
+      )
+    } else if (next) {
+      nextStates = states.map((state) =>
+        state.id === next.id ? { ...state, startFrame: gap.startFrame, durationFrames: state.durationFrames + (state.startFrame - gap.startFrame) } : state
+      )
+    }
+    onPatchItem(item.id, { roleStates: normalizeRoleStates(nextStates, item.durationFrames) }, { label: '补齐角色空隙' })
+    onSelect(item.id)
   }
 
   function cutItemFromPointer(event: PointerEvent<HTMLElement>, item: TimelineItem): void {
@@ -5318,7 +6083,7 @@ function Timeline({
 
   return (
     <div
-      className={`timeline ${razorMode ? 'razor-mode' : ''} ${dragState ? 'dragging-item' : ''}`}
+      className={`timeline ${razorMode ? 'razor-mode' : ''} ${dragState ? 'dragging-item' : ''} ${cueDrag?.mode === 'move' ? 'cue-moving' : ''} ${cueDrag && cueDrag.mode !== 'move' ? 'cue-resizing' : ''}`}
       onWheel={(event) => {
         if (!event.ctrlKey) return
         event.preventDefault()
@@ -5489,6 +6254,42 @@ function Timeline({
                           <div className={assetDropPreview.valid ? 'timeline-snap-preview' : 'timeline-snap-preview invalid'} style={{ left: `${(assetDropPreview.frame / totalFrames) * 100}%` }} />
                         </>
                       )}
+                      {cueDropPreview?.trackId === track.id && (
+                        <div className={cueDropPreview.valid ? 'timeline-drop-ghost cue-drop' : 'timeline-drop-ghost cue-drop invalid'} style={{
+                          left: `${(cueDropPreview.frame / totalFrames) * 100}%`,
+                          width: `${Math.max(1.2, (cueDropPreview.durationFrames / totalFrames) * 100)}%`
+                        }}>
+                          移动 cue
+                        </div>
+                      )}
+                      {track.kind === 'subtitle' && !items.some(isSubtitleStreamItem) && (
+                        <button
+                          type="button"
+                          className="timeline-empty-action"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onCreateSubtitleStream(track.id)
+                          }}
+                        >
+                          <Plus size={14} />
+                          创建字幕流
+                        </button>
+                      )}
+                      {track.kind === 'visual' && trackGroupId(track) === 'role' && !items.some(isRoleInstanceItem) && (
+                        <button
+                          type="button"
+                          className="timeline-empty-action"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onCreateRoleStream(track.id)
+                          }}
+                        >
+                          <Plus size={14} />
+                          创建角色流
+                        </button>
+                      )}
                       {items.map((item) => (
                         <button
                           type="button"
@@ -5523,7 +6324,7 @@ function Timeline({
                                 return cues.map((cue) => (
                                   <span
                                     key={cue.id}
-                                    className={`timeline-cue-marker ${conflicts.has(cue.id) ? 'conflict' : ''}`}
+                                    className={`timeline-cue-marker ${selectedCue?.itemId === item.id && selectedCue.cueId === cue.id ? 'selected' : ''} ${conflicts.has(cue.id) ? 'conflict' : ''}`}
                                     style={{
                                       left: `${(cue.startFrame / Math.max(1, item.durationFrames)) * 100}%`,
                                       width: `${Math.max(2.8, (cue.durationFrames / Math.max(1, item.durationFrames)) * 100)}%`
@@ -5544,6 +6345,17 @@ function Timeline({
                                 <span
                                   className="timeline-cue-gap"
                                   key={`${gap.startFrame}-${gap.durationFrames}`}
+                                  title={`角色空隙：${formatTime(item.startFrame + gap.startFrame, fps)} - ${formatTime(item.startFrame + gap.startFrame + gap.durationFrames, fps)} 无素材显示`}
+                                  onPointerDown={(event) => {
+                                    event.preventDefault()
+                                    event.stopPropagation()
+                                    onSelect(item.id)
+                                  }}
+                                  onDoubleClick={(event) => {
+                                    event.preventDefault()
+                                    event.stopPropagation()
+                                    fillRoleStateGap(item, gap)
+                                  }}
                                   style={{
                                     left: `${(gap.startFrame / Math.max(1, item.durationFrames)) * 100}%`,
                                     width: `${Math.max(1.6, (gap.durationFrames / Math.max(1, item.durationFrames)) * 100)}%`
@@ -5555,7 +6367,7 @@ function Timeline({
                                 return (
                                   <span
                                     key={state.id}
-                                    className={`timeline-cue-marker ${state.muted ? 'muted' : ''}`}
+                                    className={`timeline-cue-marker ${selectedCue?.itemId === item.id && selectedCue.cueId === state.id ? 'selected' : ''} ${state.muted ? 'muted' : ''}`}
                                     style={{
                                       left: `${(state.startFrame / Math.max(1, item.durationFrames)) * 100}%`,
                                       width: `${Math.max(3, (state.durationFrames / Math.max(1, item.durationFrames)) * 100)}%`
@@ -5629,10 +6441,12 @@ function ExportDrawerContent({
   settings,
   workspace,
   lastExport,
+  lastCover,
   onChangeCustomPreset,
   onChooseExportDir,
   onPreview,
   onExport,
+  onExportCover,
   onExportAs
 }: {
   project: ProjectFile
@@ -5640,10 +6454,12 @@ function ExportDrawerContent({
   settings: AppSettings
   workspace: WorkspaceInfo
   lastExport: RenderResult | null
+  lastCover: RenderResult | null
   onChangeCustomPreset: (patch: Partial<ExportPreset>) => void
   onChooseExportDir: () => void
   onPreview: () => void
   onExport: () => void
+  onExportCover: () => void
   onExportAs: () => void
 }): JSX.Element {
   const exportDir = settings.defaultExportDir || workspace.outputDir
@@ -5680,6 +6496,10 @@ function ExportDrawerContent({
         <Rocket size={16} />
         导出 MP4
       </button>
+      <button className="command wide" onClick={onExportCover}>
+        <ImageIcon size={16} />
+        导出封面 JPG
+      </button>
       <button className="command wide" onClick={onExportAs}>
         <Save size={16} />
         另存为...
@@ -5689,6 +6509,16 @@ function ExportDrawerContent({
           <strong>最近导出</strong>
           <span>{lastExport.outputPath}</span>
           <button className="command wide" onClick={() => window.catMeme.showItem(lastExport.outputPath)}>
+            <FolderOpen size={16} />
+            打开位置
+          </button>
+        </div>
+      )}
+      {lastCover && (
+        <div className="export-result">
+          <strong>最近封面</strong>
+          <span>{lastCover.outputPath}</span>
+          <button className="command wide" onClick={() => window.catMeme.showItem(lastCover.outputPath)}>
             <FolderOpen size={16} />
             打开位置
           </button>
@@ -6095,12 +6925,16 @@ function SubtitleStreamInspector({
   item,
   fps,
   playheadFrame,
+  selectedCueId,
+  onSelectCue,
   onPatch
 }: {
   project: ProjectFile
   item: TimelineItem
   fps: number
   playheadFrame: number
+  selectedCueId: string | null
+  onSelectCue: (cueId: string, absoluteFrame: number) => void
   onPatch: (patch: Partial<TimelineItem>) => void
 }): JSX.Element {
   const style = normalizeSubtitleStyle(project.subtitleStyle, item.style)
@@ -6189,7 +7023,11 @@ function SubtitleStreamInspector({
           {cues.map((cue, index) => {
             const endFrame = cue.startFrame + cue.durationFrames
             return (
-              <div className={`cue-row ${conflictIds.has(cue.id) ? 'conflict' : ''}`} key={cue.id}>
+              <div
+                className={`cue-row ${selectedCueId === cue.id ? 'active' : ''} ${conflictIds.has(cue.id) ? 'conflict' : ''}`}
+                key={cue.id}
+                onPointerDown={() => onSelectCue(cue.id, item.startFrame + cue.startFrame)}
+              >
                 <div className="cue-row-title">
                   <button className="time-pill" onClick={() => patchCue(cue.id, { startFrame: localFrame })}>{formatTime(item.startFrame + cue.startFrame, fps)}</button>
                   <strong>Cue {index + 1}</strong>
@@ -6216,23 +7054,63 @@ function SubtitleStreamInspector({
   )
 }
 
+function RoleCueThumb({ asset, label }: { asset?: Asset; label: string }): JSX.Element {
+  const [failed, setFailed] = useState(false)
+  const src = asset ? roleCueImageSrc(asset) : ''
+
+  useEffect(() => {
+    setFailed(false)
+  }, [src])
+
+  if (src && !failed) {
+    return (
+      <div className="role-state-thumb" title={asset ? assetDisplayName(asset) : label}>
+        <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="role-state-thumb empty" title={asset ? assetDisplayName(asset) : label}>
+      <ImageIcon size={18} />
+      <span>{asset ? assetDisplayName(asset) : label}</span>
+    </div>
+  )
+}
+
 function RoleInstanceInspector({
   project,
   item,
+  availableAssets,
   fps,
   playheadFrame,
+  selectedCueId,
+  onSelectCue,
+  onAddRoleCue,
   onPatch
 }: {
   project: ProjectFile
   item: TimelineItem
+  availableAssets: Asset[]
   fps: number
   playheadFrame: number
+  selectedCueId: string | null
+  onSelectCue: (cueId: string, absoluteFrame: number) => void
+  onAddRoleCue: (assetId: string, replaceCueId?: string) => void
   onPatch: (patch: Partial<TimelineItem>) => void
 }): JSX.Element {
   const states = normalizeRoleStates(item.roleStates, item.durationFrames)
   const localFrame = clampNumber(playheadFrame - item.startFrame, 0, Math.max(0, item.durationFrames - 1))
   const activeState = states.find((state) => localFrame >= state.startFrame && localFrame < state.startFrame + state.durationFrames) || states[0]
+  const selectedState = states.find((state) => state.id === selectedCueId) || activeState
   const gaps = roleStateGaps(states, item.durationFrames)
+  const roleAssets = mergeAssets(project.assets, availableAssets).filter((asset) => isVisualAsset(asset) && !isBackgroundAsset(asset))
+  const [assetId, setAssetId] = useState(roleAssets[0]?.id || '')
+
+  useEffect(() => {
+    if (!assetId && roleAssets[0]?.id) setAssetId(roleAssets[0].id)
+  }, [assetId, roleAssets])
+
   const patchState = (stateId: string, patch: Partial<RoleStateCue>): void => {
     const nextStates = states.map((state) => (state.id === stateId ? { ...state, ...patch } : state))
     onPatch({ roleStates: resolveRoleStateOverlaps(nextStates, stateId, item.durationFrames) })
@@ -6251,14 +7129,40 @@ function RoleInstanceInspector({
           <button onClick={() => onPatch({ roleStates: fillRoleStateGaps(states, item.durationFrames) })}>一键补齐</button>
         </div>
       )}
+      <InspectorDisclosure title="新增 / 替换 cue" meta={roleAssets.length ? `${roleAssets.length} 素材` : '无素材'}>
+        <label className="field compact">
+          <span>角色素材</span>
+          <select value={assetId} onChange={(event) => setAssetId(event.target.value)}>
+            {roleAssets.map((asset) => (
+              <option value={asset.id} key={asset.id}>
+                {assetDisplayName(asset)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="two-buttons">
+          <button className="command ghost" disabled={!assetId} onClick={() => onAddRoleCue(assetId)}>
+            <Plus size={15} />
+            当前帧添加
+          </button>
+          <button className="command ghost" disabled={!assetId || !selectedState} onClick={() => selectedState && onAddRoleCue(assetId, selectedState.id)}>
+            <ImageIcon size={15} />
+            替换选中
+          </button>
+        </div>
+      </InspectorDisclosure>
       <div className="cue-list">
         {states.map((state) => {
-          const asset = project.assets.find((entry) => entry.id === state.assetId)
+          const asset = roleAssets.find((entry) => entry.id === state.assetId) || project.assets.find((entry) => entry.id === state.assetId)
           const endFrame = state.startFrame + state.durationFrames
-          const selected = activeState?.id === state.id
+          const selected = selectedState?.id === state.id
           return (
-            <div className={`cue-row role-state-cue ${selected ? 'selected' : ''}`} key={state.id}>
-              <div className="role-state-thumb">{asset?.fileUrl ? <img src={asset.fileUrl} alt="" /> : <ImageIcon size={20} />}</div>
+            <div
+              className={`cue-row role-state-cue ${selected ? 'active selected' : ''}`}
+              key={state.id}
+              onPointerDown={() => onSelectCue(state.id, item.startFrame + state.startFrame)}
+            >
+              <RoleCueThumb asset={asset} label={state.label || '状态'} />
               <div className="role-state-main">
                 <div className="role-state-top">
                   <button className="time-pill" onClick={() => patchState(state.id, { startFrame: localFrame })}>{formatTime(item.startFrame + state.startFrame, fps)}</button>
@@ -6461,6 +7365,20 @@ function previewStageStyle(width: number, height: number): CSSProperties {
   }
 }
 
+function fallbackPreviewDisplayScale(width: number, height: number): number {
+  const safeWidth = Math.max(1, Math.round(width || 1080))
+  const safeHeight = Math.max(1, Math.round(height || 1920))
+  const maxPreviewWidth = safeWidth >= safeHeight ? 680 : safeWidth
+  const maxPreviewHeight = safeWidth >= safeHeight ? safeHeight : 560
+  return previewDisplayScaleForStage(maxPreviewWidth, maxPreviewHeight, safeWidth, safeHeight)
+}
+
+function previewDisplayScaleForStage(stageWidth: number, stageHeight: number, presetWidth: number, presetHeight: number): number {
+  const widthScale = stageWidth / Math.max(1, presetWidth)
+  const heightScale = stageHeight / Math.max(1, presetHeight)
+  return clampNumber(Math.min(widthScale, heightScale), 0.04, 1)
+}
+
 function previewLayerStyle(
   item: TimelineItem,
   asset: Asset,
@@ -6642,6 +7560,19 @@ function itemPlaybackRate(item: TimelineItem): number {
   return clampNumber(item.playbackRate ?? 1, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
 }
 
+function audioFadeMultiplier(item: TimelineItem, playheadFrame: number): number {
+  const localFrame = clampNumber(playheadFrame - item.startFrame, 0, Math.max(0, item.durationFrames))
+  const fadeIn = clampNumber(item.fadeInFrames || 0, 0, item.durationFrames)
+  const fadeOut = clampNumber(item.fadeOutFrames || 0, 0, item.durationFrames)
+  let multiplier = 1
+  if (fadeIn > 0 && localFrame < fadeIn) multiplier = Math.min(multiplier, localFrame / fadeIn)
+  if (fadeOut > 0) {
+    const remaining = Math.max(0, item.durationFrames - localFrame)
+    if (remaining < fadeOut) multiplier = Math.min(multiplier, remaining / fadeOut)
+  }
+  return clampNumber(multiplier, 0, 1)
+}
+
 function mediaPlaybackRateForAsset(item: TimelineItem, asset: Asset): number {
   return ['video', 'gif', 'audio'].includes(asset.type) ? itemPlaybackRate(item) : 1
 }
@@ -6769,7 +7700,14 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     }
     return normalizedItem
   })
-  const timeline = migrateLegacyRoleNameSubtitles(normalizedTimeline, tracks, roles, subtitleStyle)
+  const migratedTimeline = migrateLegacyRoleNameSubtitles(normalizedTimeline, tracks, roles, subtitleStyle)
+  const occupiedTrackIds = new Set(migratedTimeline.map((item) => item.trackId))
+  const roleStreamDefaults = tracks
+    .filter((track) => track.kind === 'visual' && trackGroupId(track) === 'role' && !occupiedTrackIds.has(track.id))
+    .map((track) =>
+      createRoleStreamItem({ ...projectForDefaults, tracks, roles, subtitleStyle, timeline: migratedTimeline }, track, normalizedProjectFrames, roleForTrack({ ...projectForDefaults, tracks, roles, subtitleStyle, timeline: migratedTimeline }, track, roles))
+    )
+  const timeline = roleStreamDefaults.length ? [...migratedTimeline, ...roleStreamDefaults] : migratedTimeline
   return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline, durationSeconds: normalizeProjectDurationSeconds({ ...project, timeline }, 30) }
 }
 
@@ -6967,7 +7905,10 @@ function normalizeAsset(asset: Asset | undefined | null): Asset | null {
     license: asset.license || '本地素材',
     riskLevel: asset.riskLevel || 'medium',
     title: asset.title || asset.filename,
-    createdAt: asset.createdAt || new Date().toISOString()
+    createdAt: asset.createdAt || new Date().toISOString(),
+    favorite: Boolean(asset.favorite),
+    lastUsedAt: asset.lastUsedAt,
+    useCount: Math.max(0, Number(asset.useCount || 0))
   }
 }
 
@@ -7089,19 +8030,73 @@ function insertVisualTrack(tracks: TimelineTrack[], track: TimelineTrack): Timel
   return insertIndex > -1 ? [...tracks.slice(0, insertIndex), track, ...tracks.slice(insertIndex)] : [...tracks, track]
 }
 
-function createRoleSubtitleItem(role: CharacterRole, line: string, startFrame: number, durationFrames: number): TimelineItem {
+function roleForTrack(project: ProjectFile, track: TimelineTrack, roles = projectRoles(project)): CharacterRole | undefined {
+  return (
+    roles.find((role) => role.defaultTrackId === track.id) ||
+    roles.find((role) => track.name.includes(role.name)) ||
+    roles[0]
+  )
+}
+
+function makeSubtitleTrack(trackId = 'subtitles', name = '字幕'): TimelineTrack {
+  return {
+    id: trackId,
+    name,
+    kind: 'subtitle',
+    groupId: 'subtitle',
+    locked: false,
+    muted: false
+  }
+}
+
+function createSubtitleStreamItem(
+  project: ProjectFile,
+  trackId: string,
+  totalFrames: number,
+  options: {
+    label?: string
+    style?: Partial<ProjectFile['subtitleStyle']>
+    binding?: TimelineItem['subtitleBinding']
+    roleId?: string
+    box?: Partial<SubtitleBox>
+  } = {}
+): TimelineItem {
   return {
     id: crypto.randomUUID(),
-    trackId: 'subtitles',
-    roleId: role.id,
+    trackId,
+    roleId: options.roleId,
     type: 'subtitle',
-    label: `${role.name} 台词`,
-    startFrame,
-    durationFrames,
+    label: options.label || `字幕流 ${project.timeline.filter((item) => item.type === 'subtitle').length + 1}`,
+    startFrame: 0,
+    durationFrames: totalFrames,
     sourceInFrame: 0,
+    playbackRate: 1,
     effects: [],
-    text: line,
-    style: { position: role.subtitlePosition }
+    subtitleCues: [],
+    subtitleBox: normalizeSubtitleBox(options.box),
+    subtitleBinding: options.binding,
+    speakerVisible: false,
+    speakerPosition: 'bottom',
+    style: normalizeSubtitleStyleConfig({ ...project.subtitleStyle, ...options.style })
+  }
+}
+
+function createRoleStreamItem(project: ProjectFile, track: TimelineTrack, totalFrames: number, role?: CharacterRole, asset?: Asset): TimelineItem {
+  return {
+    id: crypto.randomUUID(),
+    trackId: track.id,
+    roleId: role?.id,
+    type: 'visual',
+    label: role ? `${role.name} 角色流` : `${displayTrackName(track)} 角色流`,
+    startFrame: 0,
+    durationFrames: totalFrames,
+    sourceInFrame: 0,
+    playbackRate: 1,
+    effects: defaultEffectsForTrackKind('visual'),
+    volume: 1,
+    transform: role?.defaultTransform || (asset ? defaultTransformForAsset(project, asset, track.id) : defaultTransformForTrack(project, track.id)),
+    roleLabel: role ? createRoleLabel(role, true) : undefined,
+    roleStates: []
   }
 }
 
@@ -7240,6 +8235,8 @@ function assetMatchesSubcategory(asset: Asset, subcategory?: AssetSubcategory): 
 
 function assetMatchesPrimaryCategory(asset: Asset, category: AssetPrimaryCategory): boolean {
   if (category === 'all') return true
+  if (category === 'favorite') return Boolean(asset.favorite)
+  if (category === 'recent-used') return Boolean(asset.lastUsedAt || asset.useCount)
   const haystack = assetSearchText(asset)
   if (category === 'audio') return asset.type === 'audio' || hasNativeAudioHint(asset)
   if (category === 'green-screen') return isGreenScreenAsset(asset)
@@ -7261,17 +8258,23 @@ function compareAssets(a: Asset, b: Asset, sortMode: AssetSortMode): number {
   if (sortMode === 'duration') return (b.duration || 0) - (a.duration || 0) || (a.title || a.filename).localeCompare(b.title || b.filename, 'zh-CN')
   if (sortMode === 'type') return a.type.localeCompare(b.type) || (a.title || a.filename).localeCompare(b.title || b.filename, 'zh-CN')
   if (sortMode === 'usage') return assetUsageScore(b) - assetUsageScore(a) || (a.title || a.filename).localeCompare(b.title || b.filename, 'zh-CN')
-  return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  return assetRecentTime(b) - assetRecentTime(a)
 }
 
 function assetUsageScore(asset: Asset): number {
   let score = 0
+  if (asset.favorite) score += 80
+  score += Math.min(70, (asset.useCount || 0) * 7)
   if (isGreenScreenAsset(asset)) score += 20
   if (hasNativeAudioHint(asset)) score += 12
   if (asset.type === 'video') score += 8
   if (asset.type === 'audio') score += 6
   score += Math.min(10, assetTags(asset).length)
   return score
+}
+
+function assetRecentTime(asset: Asset): number {
+  return new Date(asset.lastUsedAt || asset.createdAt || 0).getTime()
 }
 
 function countAssetsForCategory(assets: Asset[], category: AssetPrimaryCategory): number {
@@ -7283,6 +8286,8 @@ function assetBadges(asset: Asset): string[] {
   if (isGreenScreenAsset(asset)) badges.push('绿幕')
   if (greenAlphaVariant(asset)) badges.push('透明缓存')
   if (hasNativeAudioHint(asset)) badges.push('有声')
+  if (asset.favorite) badges.push('收藏')
+  if (asset.useCount) badges.push(`用过${asset.useCount}次`)
   if (asset.duration) badges.push(formatDurationSeconds(asset.duration))
   if (asset.width && asset.height) badges.push(`${asset.width}x${asset.height}`)
   assetTags(asset).slice(0, 2).forEach((tag) => {
@@ -7306,11 +8311,21 @@ function formatAssetInfo(asset: Asset): string {
   return parts.join(' · ')
 }
 
+function emptyWaveformData(assetId: string): WaveformData {
+  return { assetId, samples: [], peak: 0, mean: 0, createdAt: new Date().toISOString() }
+}
+
 function formatDurationSeconds(seconds: number): string {
   const value = Math.max(0, Math.round(seconds))
   const minute = Math.floor(value / 60)
   const second = value % 60
   return minute ? `${minute}:${String(second).padStart(2, '0')}` : `${second}s`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 function riskName(risk: string): string {
@@ -7682,19 +8697,22 @@ function mergeRoleLabelPatch(
   }
 }
 
-function previewSubtitleCss(style: ProjectFile['subtitleStyle'], box?: SubtitleBox): CSSProperties {
+function previewSubtitleCss(style: ProjectFile['subtitleStyle'], box?: SubtitleBox, displayScale = 0.34): CSSProperties {
   const outline = style.outlineColor
   const subtitleBox = normalizeSubtitleBox(box)
+  const fontSize = Math.max(10, Math.round(style.fontSize * displayScale))
+  const padding = Math.round(subtitleBox.padding * displayScale)
+  const outlineWidth = Math.max(1, Math.round(style.outlineWidth * displayScale))
   return {
     width: '100%',
     height: subtitleBox.autoHeight ? 'auto' : '100%',
     display: 'flex',
     alignItems: subtitleBox.verticalAlign === 'top' ? 'flex-start' : subtitleBox.verticalAlign === 'bottom' ? 'flex-end' : 'center',
     justifyContent: subtitleBox.textAlign === 'left' ? 'flex-start' : subtitleBox.textAlign === 'right' ? 'flex-end' : 'center',
-    padding: `${subtitleBox.padding}px`,
+    padding: `${padding}px`,
     fontFamily: style.fontFamily,
     color: style.color,
-    fontSize: `${Math.max(14, Math.round(style.fontSize * 0.34))}px`,
+    fontSize: `${fontSize}px`,
     lineHeight: subtitleBox.lineHeight,
     textAlign: subtitleBox.textAlign,
     whiteSpace: 'pre-wrap',
@@ -7703,29 +8721,48 @@ function previewSubtitleCss(style: ProjectFile['subtitleStyle'], box?: SubtitleB
     background: style.background ? style.backgroundColor : 'transparent',
     boxShadow: style.background ? `0 0 0 1px ${style.outlineColor}` : 'none',
     textShadow: [
-      `1px 0 0 ${outline}`,
-      `-1px 0 0 ${outline}`,
-      `0 1px 0 ${outline}`,
-      `0 -1px 0 ${outline}`,
-      `1px 1px 0 ${outline}`
+      `${outlineWidth}px 0 0 ${outline}`,
+      `-${outlineWidth}px 0 0 ${outline}`,
+      `0 ${outlineWidth}px 0 ${outline}`,
+      `0 -${outlineWidth}px 0 ${outline}`,
+      `${outlineWidth}px ${outlineWidth}px 0 ${outline}`
     ].join(', ')
   }
 }
 
-function previewRoleLabelCss(style: ProjectFile['subtitleStyle'], transform: NormalizedTransform): CSSProperties {
+function previewSpeakerCss(style: ProjectFile['subtitleStyle'], displayScale = 0.34): CSSProperties {
+  const outline = '#111111'
+  const fontSize = Math.max(10, Math.round(Math.max(30, style.fontSize * 0.58) * displayScale))
+  const outlineWidth = Math.max(1, Math.round(2 * displayScale))
+  return {
+    fontFamily: style.fontFamily,
+    fontSize: `${fontSize}px`,
+    textShadow: [
+      `${outlineWidth}px 0 0 ${outline}`,
+      `-${outlineWidth}px 0 0 ${outline}`,
+      `0 ${outlineWidth}px 0 ${outline}`,
+      `0 -${outlineWidth}px 0 ${outline}`,
+      `${outlineWidth}px ${outlineWidth}px 0 ${outline}`
+    ].join(', ')
+  }
+}
+
+function previewRoleLabelCss(style: ProjectFile['subtitleStyle'], transform: NormalizedTransform, displayScale = 0.34): CSSProperties {
   const outline = style.outlineColor
+  const fontSize = Math.max(10, Math.round(style.fontSize * transform.scale * displayScale))
+  const outlineWidth = Math.max(1, Math.round(style.outlineWidth * transform.scale * displayScale))
   return {
     fontFamily: style.fontFamily,
     color: style.color,
-    fontSize: `${Math.max(12, Math.round(style.fontSize * 0.34 * transform.scale))}px`,
+    fontSize: `${fontSize}px`,
     background: style.background ? style.backgroundColor : 'transparent',
     boxShadow: style.background ? `0 0 0 1px ${style.outlineColor}` : 'none',
     textShadow: [
-      `1px 0 0 ${outline}`,
-      `-1px 0 0 ${outline}`,
-      `0 1px 0 ${outline}`,
-      `0 -1px 0 ${outline}`,
-      `${Math.max(1, Math.round(style.outlineWidth * 0.5))}px ${Math.max(1, Math.round(style.outlineWidth * 0.5))}px 0 ${outline}`
+      `${outlineWidth}px 0 0 ${outline}`,
+      `-${outlineWidth}px 0 0 ${outline}`,
+      `0 ${outlineWidth}px 0 ${outline}`,
+      `0 -${outlineWidth}px 0 ${outline}`,
+      `${outlineWidth}px ${outlineWidth}px 0 ${outline}`
     ].join(', '),
     transform: `scale(${transform.flipX ? -1 : 1}, ${transform.flipY ? -1 : 1})`
   }
@@ -7738,6 +8775,14 @@ function isGreenScreenAsset(asset: Asset): boolean {
 
 function greenAlphaVariant(asset: Asset): NonNullable<Asset['processedVariants']>[number] | undefined {
   return asset.processedVariants?.find((variant) => variant.kind === 'green-alpha' && Boolean(variant.fileUrl || variant.localPath))
+}
+
+function roleCueImageSrc(asset: Asset): string {
+  const alphaVariant = greenAlphaVariant(asset)
+  if (alphaVariant?.format === 'png' && alphaVariant.fileUrl) return alphaVariant.fileUrl
+  if ((asset.type === 'image' || asset.type === 'gif') && asset.fileUrl) return asset.fileUrl
+  const cached = greenThumbFrameCache.get(asset.fileUrl || asset.localPath || asset.id)
+  return cached || ''
 }
 
 function visibleBodyHeightUnit(asset?: Asset | null): number {
@@ -8186,6 +9231,8 @@ function subtitleCueConflictIds(cues: SubtitleCue[]): Set<string> {
 function canMoveItemToTrack(project: ProjectFile, item: TimelineItem, trackId: string): boolean {
   const track = project.tracks.find((track) => track.id === trackId)
   if (!track || track.locked || track.kind !== item.type) return false
+  if (isSubtitleStreamItem(item)) return track.kind === 'subtitle'
+  if (isRoleInstanceItem(item)) return track.kind === 'visual' && trackGroupId(track) === 'role'
   if (item.assetId) {
     const asset = project.assets.find((asset) => asset.id === item.assetId)
     if (asset) return canDropAssetOnTimelineTrack(project, asset, track)
@@ -8198,8 +9245,9 @@ function canDropAssetOnTimelineTrack(project: ProjectFile, asset: Asset, track: 
   if (track.kind !== 'visual') return true
   const groupId = trackGroupId(track)
   const targetGroup = visualTargetGroupForAsset(asset)
+  if (groupId === 'role') return !isBackgroundAsset(asset)
   if (targetGroup === 'background') return groupId === 'background'
-  if (targetGroup === 'role') return groupId === 'role'
+  if (targetGroup === 'role') return false
   if (targetGroup === 'effect') return groupId === 'effect'
   return false
 }

@@ -1,5 +1,4 @@
 import { app } from 'electron'
-import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import type { AppSettings, WorkspaceInfo } from '../shared/types'
@@ -7,11 +6,6 @@ import type { AppSettings, WorkspaceInfo } from '../shared/types'
 export function resolveWorkspaceRoot(): string {
   if (process.env.CAT_MEME_HOME) {
     return path.resolve(process.env.CAT_MEME_HOME)
-  }
-
-  const driveRoot = 'D:\\cat_meme'
-  if (process.platform === 'win32' && existsSync('D:\\')) {
-    return driveRoot
   }
 
   if (!app.isPackaged) {
