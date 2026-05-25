@@ -9,9 +9,33 @@ PowerShell on Windows may block `npm.ps1`; use `npm.cmd` when that happens.
 ```powershell
 npm.cmd install
 npm.cmd run dev
+npm.cmd run lint
+npm.cmd run test
+npm.cmd run verify
 npm.cmd run typecheck
 npm.cmd run build:app
 ```
+
+## AI Engineering Workflow
+
+This repository is prepared for an AI-agent coding flow:
+
+- `AGENTS.md` is the operating manual for Codex/Claude/Gemini-style agents.
+- `docs/architecture.md` explains the Electron, workspace, asset, and render boundaries.
+- `docs/coding-style.md` defines code and media-editing rules.
+- `docs/api-spec.md` describes the preload IPC API surface.
+- `docs/workflow.md` describes branch, worktree, self-test, review, and CI flow.
+- `tasks/task-template.md` is the starting point for every non-trivial task.
+- `tasks/lessons.md` stores reusable project knowledge found during implementation.
+
+Recommended loop:
+
+```powershell
+git switch -c codex/task-000-short-name
+npm.cmd run verify
+```
+
+Use one task file and one branch/worktree per task. Before final handoff, run `npm.cmd run verify`; CI runs the same gate on pull requests.
 
 ## Workspace Rules
 

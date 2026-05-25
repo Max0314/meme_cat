@@ -9,6 +9,9 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "lint": "npm run typecheck",
+    "test": "node scripts/verify-ai-workflow.mjs",
+    "verify": "npm run lint && npm run test && npm run build:app",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "build:app": "electron-vite build",
     "build": "npm run dist:dir",
