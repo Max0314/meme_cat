@@ -2,6 +2,7 @@ import type { Asset, AssetSearchRequest, TimelineItem, TrackGroupId, TrackKind, 
 export type { VisibleBounds } from '../../shared/types'
 
 export type AssetPrimaryCategory = 'all' | 'favorite' | 'recent-used' | 'background' | 'character' | 'green-screen' | 'audio' | 'props' | 'sticker'
+export type AssetSourceFilter = 'all' | 'managed' | 'external' | 'bundled'
 export type AssetSortMode = 'recent' | 'name' | 'duration' | 'type' | 'usage'
 export type AssetViewMode = 'grid' | 'list'
 export type TrackGroupFilter = TrackGroupId | 'all'
@@ -34,6 +35,7 @@ export interface LocalAssetFilter {
   primaryCategory: AssetPrimaryCategory
   subCategory: string
   typeFilter: AssetSearchRequest['type']
+  sourceFilter: AssetSourceFilter
   sortMode: AssetSortMode
 }
 

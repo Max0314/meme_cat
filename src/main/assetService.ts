@@ -76,6 +76,7 @@ interface OpenverseResult {
 
 const providerLabel: Record<AssetProvider, string> = {
   local: '本地',
+  external: '外部目录',
   pexels: 'Pexels',
   pixabay: 'Pixabay',
   openverse: 'Openverse',
@@ -112,7 +113,11 @@ async function loadBundledAssetIndex(): Promise<Asset[]> {
     .map((asset) => ({
       ...asset,
       localPath: path.join(bundledAssetsRoot, bundledAssetRelativePath(asset)),
-      sourceUrl: asset.sourceUrl || 'bundled://asset'
+      sourceUrl: asset.sourceUrl || 'bundled://asset',
+      source: {
+        ...asset.source,
+        kind: 'bundled' as const
+      }
     }))
     .filter((asset) => existsSync(asset.localPath))
 }
@@ -313,7 +318,15 @@ export async function importLocalAsset(info: WorkspaceInfo, filePath: string): P
     riskLevel: 'medium',
     tags: ['local'],
     title: path.parse(filePath).name,
-    createdAt: new Date(fileInfo.birthtimeMs || Date.now()).toISOString()
+    createdAt: new Date(fileInfo.birthtimeMs || Date.now()).toISOString(),
+    source: {
+      kind: 'managed',
+      originalPath: filePath,
+      fingerprint: {
+        size: fileInfo.size,
+        mtimeMs: fileInfo.mtimeMs
+      }
+    }
   }
 
   const assets = await loadAssetIndex(info)

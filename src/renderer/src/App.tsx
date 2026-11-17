@@ -52,6 +52,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import type {
   AppSettings,
   Asset,
+  AssetLibrarySource,
   AssetProvider,
   GreenScreenPreprocessProgress,
   AssetSearchRequest,
@@ -103,6 +104,7 @@ import {
 } from './constants'
 import type {
   AssetPrimaryCategory,
+  AssetSourceFilter,
   AssetSortMode,
   AssetSubcategory,
   AssetViewMode,
@@ -223,8 +225,11 @@ function App(): JSX.Element {
   const [assetPrimaryCategory, setAssetPrimaryCategory] = useState<AssetPrimaryCategory>('all')
   const [assetSubCategory, setAssetSubCategory] = useState('all')
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetSearchRequest['type']>('all')
+  const [assetSourceFilter, setAssetSourceFilter] = useState<AssetSourceFilter>('all')
   const [assetSortMode, setAssetSortMode] = useState<AssetSortMode>('recent')
   const [assetViewMode, setAssetViewMode] = useState<AssetViewMode>('grid')
+  const [assetLibraries, setAssetLibraries] = useState<AssetLibrarySource[]>([])
+  const [assetLibraryBusyId, setAssetLibraryBusyId] = useState<string | null>(null)
   const [undoStack, setUndoStack] = useState<ProjectHistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<ProjectHistoryEntry[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
@@ -396,9 +401,10 @@ function App(): JSX.Element {
         primaryCategory: assetPrimaryCategory,
         subCategory: assetSubCategory,
         typeFilter: assetTypeFilter,
+        sourceFilter: assetSourceFilter,
         sortMode: assetSortMode
       }),
-    [assetPrimaryCategory, assetSortMode, assetSubCategory, assetTypeFilter, localAssetQuery, localAssets]
+    [assetPrimaryCategory, assetSortMode, assetSourceFilter, assetSubCategory, assetTypeFilter, localAssetQuery, localAssets]
   )
 
   const assetCategoryCounts = useMemo(
@@ -413,20 +419,22 @@ function App(): JSX.Element {
   async function boot(): Promise<void> {
     try {
       setBusy('启动中')
-      const [workspaceInfo, nextSettings, nextPresets, nextTemplates, nextProject, assets] = await Promise.all([
+      const [workspaceInfo, nextSettings, nextPresets, nextTemplates, nextProject, assets, libraries] = await Promise.all([
         window.catMeme.workspaceInfo(),
         window.catMeme.getSettings(),
         window.catMeme.listPresets(),
         window.catMeme.listTemplates(),
         window.catMeme.newProject(),
-        window.catMeme.listAssets()
+        window.catMeme.listAssets(),
+        window.catMeme.listAssetLibraries()
       ])
       const normalizedAssets = normalizeAssets(assets)
       setWorkspace(workspaceInfo)
       setSettings(nextSettings)
       setPresets(nextPresets)
       setTemplates(nextTemplates)
-      replaceProjectWithoutHistory(normalizeProject({ ...nextProject, assets: normalizedAssets }), { resetHistory: true })
+      setAssetLibraries(libraries)
+      replaceProjectWithoutHistory(normalizeProject(nextProject), { resetHistory: true })
       setLocalAssets(normalizedAssets)
       setNotice(`工作区：${workspaceInfo.root}`)
     } catch (error) {
@@ -649,7 +657,7 @@ function App(): JSX.Element {
   }
 
   async function preprocessFilteredGreenScreenAssets(force = false): Promise<void> {
-    const assetIds = filteredLocalAssets.filter(isGreenScreenAsset).map((asset) => asset.id)
+    const assetIds = filteredLocalAssets.filter((asset) => isGreenScreenAsset(asset) && !isExternalAsset(asset)).map((asset) => asset.id)
     if (!assetIds.length) {
       setNotice('当前筛选结果没有绿幕素材')
       return
@@ -682,6 +690,77 @@ function App(): JSX.Element {
       setNotice(`已清理未引用透明缓存 ${result.deleted} 个，释放 ${formatBytes(result.bytes)}`)
     } catch (error) {
       setNotice(errorText(error))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function refreshAssetSources(): Promise<Asset[]> {
+    const [assets, libraries] = await Promise.all([window.catMeme.listAssets(), window.catMeme.listAssetLibraries()])
+    const normalizedAssets = normalizeAssets(assets)
+    setLocalAssets(normalizedAssets)
+    setAssetLibraries(libraries)
+    return normalizedAssets
+  }
+
+  async function addExternalAssetLibrary(): Promise<void> {
+    try {
+      setBusy('添加素材库')
+      const result = await window.catMeme.addAssetLibraryFolder()
+      if (!result) return
+      await refreshAssetSources()
+      setNotice(`已添加外部素材库：${result.source.name}，新增 ${result.added} 个，跳过 ${result.skipped} 个`)
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function scanExternalAssetLibrary(libraryId: string): Promise<void> {
+    try {
+      setAssetLibraryBusyId(libraryId)
+      const result = await window.catMeme.scanAssetLibrary(libraryId)
+      await refreshAssetSources()
+      const warningText = result.warnings.length ? `，警告 ${result.warnings.length} 条` : ''
+      setNotice(`已扫描 ${result.source.name}：新增 ${result.added}，更新 ${result.updated}，丢失 ${result.missing}，跳过 ${result.skipped}${warningText}`)
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      setAssetLibraryBusyId(null)
+    }
+  }
+
+  async function removeExternalAssetLibrary(libraryId: string): Promise<void> {
+    try {
+      setAssetLibraryBusyId(libraryId)
+      const nextLibraries = await window.catMeme.removeAssetLibrary(libraryId)
+      setAssetLibraries(nextLibraries)
+      await refreshAssetSources()
+      setNotice('已取消挂载外部素材库，未删除任何素材文件')
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      setAssetLibraryBusyId(null)
+    }
+  }
+
+  async function ensureManagedAsset(asset: Asset): Promise<Asset | null> {
+    if (!isExternalAsset(asset)) return asset
+    if (asset.availability && asset.availability !== 'available') {
+      setNotice(`${assetDisplayName(asset)} 当前不可用，请重新扫描素材库`)
+      return null
+    }
+    try {
+      setBusy('复制外部素材')
+      const materialized = normalizeAsset(await window.catMeme.materializeAsset(asset.id))
+      if (!materialized) return null
+      setLocalAssets((current) => mergeAssets([materialized], current))
+      setNotice(`已复制到工作区：${assetDisplayName(materialized)}`)
+      return materialized
+    } catch (error) {
+      setNotice(errorText(error))
+      return null
     } finally {
       setBusy(null)
     }
@@ -746,26 +825,30 @@ function App(): JSX.Element {
     setNotice('选择/移动工具：拖动画布元素或时间线片段进行调整')
   }
 
-  function addAssetToTimeline(asset: Asset, trackKind?: TrackKind): void {
+  async function addAssetToTimeline(asset: Asset, trackKind?: TrackKind): Promise<void> {
     if (!project || !currentPreset) return
-    const trackId = trackIdForAssetDrop(project, asset, selectedItem, trackKind, activeTool)
+    const managedAsset = await ensureManagedAsset(asset)
+    if (!managedAsset) return
+    const trackId = trackIdForAssetDrop(project, managedAsset, selectedItem, trackKind, activeTool)
     const track = project.tracks.find((item) => item.id === trackId)
     const startFrame = track?.kind === 'visual' ? playheadFrame : nextStartFrame(project, trackId)
-    addAssetToTimelineAt(asset, trackId, startFrame, undefined, { allowAutoTrack: true })
+    addAssetToTimelineAt(managedAsset, trackId, startFrame, undefined, { allowAutoTrack: true })
   }
 
-  function addAssetToPurpose(asset: Asset, purpose: 'background' | 'role' | 'audio'): void {
+  async function addAssetToPurpose(asset: Asset, purpose: 'background' | 'role' | 'audio'): Promise<void> {
     if (!project) return
+    const managedAsset = await ensureManagedAsset(asset)
+    if (!managedAsset) return
     const visualTracks = project.tracks.filter((track) => track.kind === 'visual')
     if (purpose === 'background') {
-      if (!isBackgroundAsset(asset) && isCharacterLikeAsset(asset)) {
+      if (!isBackgroundAsset(managedAsset) && isCharacterLikeAsset(managedAsset)) {
         const track = trackByGroupKind(project, 'role', 'visual')
-        if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
+        if (track) addAssetToTimelineAt(managedAsset, track.id, playheadFrame)
         setNotice('这是角色/绿幕素材，已自动放入角色轨')
         return
       }
       const track = project.tracks.find((item) => item.id === backgroundTrackId(project)) || visualTracks[0]
-      if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
+      if (track) addAssetToTimelineAt(managedAsset, track.id, playheadFrame)
       return
     }
     if (purpose === 'role') {
@@ -773,12 +856,12 @@ function App(): JSX.Element {
         visualTracks.find((item) => item.id.startsWith('visual-role')) ||
         visualTracks.find((item) => item.id !== 'visual-main') ||
         visualTracks[0]
-      if (track) addAssetToTimelineAt(asset, track.id, playheadFrame)
+      if (track) addAssetToTimelineAt(managedAsset, track.id, playheadFrame)
       return
     }
-    const audioKind: TrackKind = isBgmAsset(asset) ? 'music' : 'sfx'
+    const audioKind: TrackKind = isBgmAsset(managedAsset) ? 'music' : 'sfx'
     const track = project.tracks.find((item) => item.id === trackIdForKind(project, audioKind, selectedItem)) || project.tracks.find((item) => item.kind === audioKind)
-    if (track) addAssetToTimelineAt(asset, track.id, nextStartFrame(project, track.id))
+    if (track) addAssetToTimelineAt(managedAsset, track.id, nextStartFrame(project, track.id))
   }
 
   function addRoleStateToTimelineAt(asset: Asset, track: TimelineTrack, startFrame: number): boolean {
@@ -832,6 +915,17 @@ function App(): JSX.Element {
     setNotice(existing ? `已添加角色状态：${assetDisplayName(asset)}` : `已创建角色流：${assetDisplayName(asset)}`)
     recordAssetUse(asset)
     return true
+  }
+
+  async function addMaybeExternalAssetToTimelineAt(
+    asset: Asset,
+    trackId: string,
+    startFrame: number,
+    transformOverride?: Partial<ReturnType<typeof normalizeTransform>>,
+    options: { allowAutoTrack?: boolean } = {}
+  ): Promise<boolean> {
+    const managedAsset = await ensureManagedAsset(asset)
+    return managedAsset ? addAssetToTimelineAt(managedAsset, trackId, startFrame, transformOverride, options) : false
   }
 
   function addAssetToTimelineAt(
@@ -923,14 +1017,16 @@ function App(): JSX.Element {
     return true
   }
 
-  function addAssetToPreview(assetId: string, clientX: number, clientY: number, stage: HTMLElement): void {
+  async function addAssetToPreview(assetId: string, clientX: number, clientY: number, stage: HTMLElement): Promise<void> {
     if (!project || !currentPreset) return
-    const asset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
-    if (!asset) return
-    if (!isVisualAsset(asset)) {
+    const sourceAsset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
+    if (!sourceAsset) return
+    if (!isVisualAsset(sourceAsset)) {
       setNotice('只有图片、视频、GIF 可以直接拖到画面')
       return
     }
+    const asset = await ensureManagedAsset(sourceAsset)
+    if (!asset) return
     const bounds = stage.getBoundingClientRect()
     const trackId = trackIdForVisualAsset(project, asset, selectedItem)
     const baseTransform = defaultTransformForAsset(project, asset, trackId, currentPreset)
@@ -1237,11 +1333,13 @@ function App(): JSX.Element {
     return true
   }
 
-  function addRoleCueFromInspector(itemId: string, assetId: string, replaceCueId?: string): void {
+  async function addRoleCueFromInspector(itemId: string, assetId: string, replaceCueId?: string): Promise<void> {
     if (!project || !currentPreset) return
     const item = project.timeline.find((entry) => entry.id === itemId)
-    const asset = project.assets.find((entry) => entry.id === assetId) || localAssets.find((entry) => entry.id === assetId)
-    if (!item || !isRoleInstanceItem(item) || !asset || !isVisualAsset(asset) || isBackgroundAsset(asset)) return
+    const sourceAsset = project.assets.find((entry) => entry.id === assetId) || localAssets.find((entry) => entry.id === assetId)
+    if (!item || !isRoleInstanceItem(item) || !sourceAsset || !isVisualAsset(sourceAsset) || isBackgroundAsset(sourceAsset)) return
+    const asset = await ensureManagedAsset(sourceAsset)
+    if (!asset) return
     const states = normalizeRoleStates(item.roleStates, item.durationFrames)
     const localFrame = clampNumber(playheadFrame - item.startFrame, 0, Math.max(0, item.durationFrames - 1))
     const previousState = [...states].reverse().find((state) => state.startFrame <= localFrame)
@@ -1520,16 +1618,18 @@ function App(): JSX.Element {
     setNotice(role ? `已删除角色配置：${role.name}` : '已删除角色配置')
   }
 
-  function addRoleMeme(roleId: string, asset: Asset): void {
+  async function addRoleMeme(roleId: string, asset: Asset): Promise<void> {
     if (!project) return
+    const managedAsset = await ensureManagedAsset(asset)
+    if (!managedAsset) return
     updateProject({
       ...project,
-      assets: mergeAssets(project.assets, [asset]),
+      assets: mergeAssets(project.assets, [managedAsset]),
       roles: projectRoles(project).map((role) =>
-        role.id === roleId ? { ...role, memeAssetIds: uniqueStrings([asset.id, ...role.memeAssetIds]) } : role
+        role.id === roleId ? { ...role, memeAssetIds: uniqueStrings([managedAsset.id, ...role.memeAssetIds]) } : role
       )
     })
-    setNotice(`已加入常用 meme：${asset.title || asset.filename}`)
+    setNotice(`已加入常用 meme：${managedAsset.title || managedAsset.filename}`)
   }
 
   function removeRoleMeme(roleId: string, assetId: string): void {
@@ -1583,7 +1683,7 @@ function App(): JSX.Element {
   }
 
   function placeRoleMeme(role: CharacterRole, asset: Asset): void {
-    placeRoleScene(role, asset, '')
+    void placeRoleScene(role, asset, '')
   }
 
   function appendSubtitleCueToStream(
@@ -1670,15 +1770,17 @@ function App(): JSX.Element {
     placeRoleLineAtFrame(role, line, playheadFrame, durationFrames)
   }
 
-  function placeRoleScene(role: CharacterRole, asset: Asset, line: string): void {
+  async function placeRoleScene(role: CharacterRole, asset: Asset, line: string): Promise<void> {
     if (!project || !currentPreset) return
+    const managedAsset = await ensureManagedAsset(asset)
+    if (!managedAsset) return
     const existingTrack = role.defaultTrackId ? project.tracks.find((track) => track.id === role.defaultTrackId) : null
     const track = existingTrack || makeRoleTrack(role)
     const tracks = existingTrack ? project.tracks : insertVisualTrack(project.tracks, track)
     const totalFrames = projectDurationFrames({ ...project, tracks }, currentPreset.fps)
     const durationFrames = Math.max(
       currentPreset.fps,
-      Math.round((asset.duration || 3.2) * currentPreset.fps),
+      Math.round((managedAsset.duration || 3.2) * currentPreset.fps),
       line ? lineDurationFrames(line, currentPreset.fps) : 0
     )
     const existingStream = project.timeline.find((item) => item.trackId === track.id && isRoleInstanceItem(item) && item.roleId === role.id)
@@ -1689,20 +1791,20 @@ function App(): JSX.Element {
     const previousAsset = previousState ? project.assets.find((item) => item.id === previousState.assetId) : undefined
     const state: RoleStateCue = {
       id: crypto.randomUUID(),
-      assetId: asset.id,
+      assetId: managedAsset.id,
       startFrame: localStart,
       durationFrames: Math.min(durationFrames, Math.max(1, streamDuration - localStart)),
       sourceInFrame: 0,
       muted: false,
       volume: 1,
-      scale: defaultRoleStateScale(asset, previousAsset, previousState),
+      scale: defaultRoleStateScale(managedAsset, previousAsset, previousState),
       offsetX: 0,
       offsetY: 0,
       fitMode: 'visible-bounds',
-      label: asset.title || asset.filename,
-      keying: isGreenScreenAsset(asset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
+      label: managedAsset.title || managedAsset.filename,
+      keying: isGreenScreenAsset(managedAsset) ? { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 } : undefined
     }
-    const roleStream = existingStream || createRoleStreamItem({ ...project, tracks }, track, streamDuration, role, asset)
+    const roleStream = existingStream || createRoleStreamItem({ ...project, tracks }, track, streamDuration, role, managedAsset)
     const nextRoleStream = {
       ...roleStream,
       durationFrames: streamDuration,
@@ -1711,9 +1813,9 @@ function App(): JSX.Element {
     const projectWithRoleStream: ProjectFile = {
       ...project,
       tracks,
-      assets: mergeAssets(project.assets, [asset]),
+      assets: mergeAssets(project.assets, [managedAsset]),
       roles: projectRoles(project).map((item) =>
-        item.id === role.id ? { ...item, defaultTrackId: track.id, memeAssetIds: uniqueStrings([asset.id, ...item.memeAssetIds]) } : item
+        item.id === role.id ? { ...item, defaultTrackId: track.id, memeAssetIds: uniqueStrings([managedAsset.id, ...item.memeAssetIds]) } : item
       ),
       timeline: existingStream
         ? project.timeline.map((item) => (item.id === existingStream.id ? nextRoleStream : item))
@@ -2604,11 +2706,18 @@ function App(): JSX.Element {
           onSubCategoryChange={setAssetSubCategory}
           typeFilter={assetTypeFilter}
           onTypeFilterChange={setAssetTypeFilter}
+          sourceFilter={assetSourceFilter}
+          onSourceFilterChange={setAssetSourceFilter}
           sortMode={assetSortMode}
           onSortModeChange={setAssetSortMode}
           viewMode={assetViewMode}
           onViewModeChange={setAssetViewMode}
+          assetLibraries={assetLibraries}
+          assetLibraryBusyId={assetLibraryBusyId}
           onImport={importLocalAssets}
+          onAddExternalLibrary={addExternalAssetLibrary}
+          onScanExternalLibrary={scanExternalAssetLibrary}
+          onRemoveExternalLibrary={removeExternalAssetLibrary}
           onPreprocessGreen={() => preprocessFilteredGreenScreenAssets(false)}
           onPreprocessGreenForce={() => preprocessFilteredGreenScreenAssets(true)}
           onCleanupGreen={cleanupGreenCache}
@@ -2789,11 +2898,13 @@ function App(): JSX.Element {
             onItemContextMenu={openItemContextMenu}
             onDropAsset={(assetId, trackId, frame) => {
               const asset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
-              return asset ? addAssetToTimelineAt(asset, trackId, frame) : false
+              if (asset) void addMaybeExternalAssetToTimelineAt(asset, trackId, frame)
             }}
             onDropAssetToDefaultTrack={(assetId, frame) => {
               const asset = project.assets.find((item) => item.id === assetId) || localAssets.find((item) => item.id === assetId)
-              return asset ? addAssetToTimelineAt(asset, trackIdForAssetDrop(project, asset, selectedItem, undefined, activeTool), frame, undefined, { allowAutoTrack: true }) : false
+              if (asset) {
+                void addMaybeExternalAssetToTimelineAt(asset, trackIdForAssetDrop(project, asset, selectedItem, undefined, activeTool), frame, undefined, { allowAutoTrack: true })
+              }
             }}
           />
         </section>
@@ -2916,11 +3027,18 @@ function AssetLibraryPanel({
   onSubCategoryChange,
   typeFilter,
   onTypeFilterChange,
+  sourceFilter,
+  onSourceFilterChange,
   sortMode,
   onSortModeChange,
   viewMode,
   onViewModeChange,
+  assetLibraries,
+  assetLibraryBusyId,
   onImport,
+  onAddExternalLibrary,
+  onScanExternalLibrary,
+  onRemoveExternalLibrary,
   onPreprocessGreen,
   onPreprocessGreenForce,
   onCleanupGreen,
@@ -2941,11 +3059,18 @@ function AssetLibraryPanel({
   onSubCategoryChange: (category: string) => void
   typeFilter: AssetSearchRequest['type']
   onTypeFilterChange: (type: AssetSearchRequest['type']) => void
+  sourceFilter: AssetSourceFilter
+  onSourceFilterChange: (source: AssetSourceFilter) => void
   sortMode: AssetSortMode
   onSortModeChange: (sort: AssetSortMode) => void
   viewMode: AssetViewMode
   onViewModeChange: (mode: AssetViewMode) => void
+  assetLibraries: AssetLibrarySource[]
+  assetLibraryBusyId: string | null
   onImport: () => Promise<void>
+  onAddExternalLibrary: () => Promise<void>
+  onScanExternalLibrary: (libraryId: string) => Promise<void>
+  onRemoveExternalLibrary: (libraryId: string) => Promise<void>
   onPreprocessGreen: () => Promise<void>
   onPreprocessGreenForce: () => Promise<void>
   onCleanupGreen: () => Promise<void>
@@ -2956,9 +3081,15 @@ function AssetLibraryPanel({
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const subcategories = ASSET_SUBCATEGORIES[primaryCategory] || ASSET_SUBCATEGORIES.all
-  const greenAssets = filteredLocalAssets.filter(isGreenScreenAsset)
+  const greenAssets = filteredLocalAssets.filter((asset) => isGreenScreenAsset(asset) && !isExternalAsset(asset))
   const cachedGreenAssets = greenAssets.filter((asset) => Boolean(greenAlphaVariant(asset))).length
   const preprocessing = Boolean(preprocessProgress && preprocessProgress.current < preprocessProgress.total)
+  const externalCount = localAssets.filter(isExternalAsset).length
+  const libraryCounts = new Map<string, number>()
+  localAssets.forEach((asset) => {
+    const libraryId = asset.source?.libraryId
+    if (isExternalAsset(asset) && libraryId) libraryCounts.set(libraryId, (libraryCounts.get(libraryId) || 0) + 1)
+  })
 
   return (
     <aside className="left-panel asset-workbench">
@@ -2986,6 +3117,14 @@ function AssetLibraryPanel({
               </option>
             ))}
           </select>
+          <select value={sourceFilter} onChange={(event) => onSourceFilterChange(event.target.value as AssetSourceFilter)}>
+            <option value="all">全部来源</option>
+            <option value="managed">工作区</option>
+            <option value="external">外部目录</option>
+            <option value="bundled">内置</option>
+          </select>
+        </div>
+        <div className="asset-filter-row">
           <select value={sortMode} onChange={(event) => onSortModeChange(event.target.value as AssetSortMode)}>
             {ASSET_SORT_OPTIONS.map((option) => (
               <option value={option.id} key={option.id}>
@@ -3007,11 +3146,32 @@ function AssetLibraryPanel({
             <Upload size={15} />
             导入
           </button>
+          <button className="command compact" onClick={onAddExternalLibrary}>
+            <FolderOpen size={15} />
+            挂载
+          </button>
           <button className="command compact" disabled={!greenAssets.length || preprocessing} onClick={onPreprocessGreen}>
             <Sparkles size={15} />
             透明缓存
           </button>
         </div>
+        {assetLibraries.length > 0 && (
+          <div className="asset-library-sources">
+            {assetLibraries.map((library) => {
+              const busy = assetLibraryBusyId === library.id
+              return (
+                <div className="asset-library-source" key={library.id}>
+                  <Folder size={14} />
+                  <span title={library.rootPath}>{library.name}</span>
+                  <small>{libraryCounts.get(library.id) || 0}</small>
+                  <IconButton title="重新扫描" disabled={busy} onClick={() => onScanExternalLibrary(library.id)} icon={busy ? <Loader2 className="spin" /> : <RotateCcw />} />
+                  <IconButton title="取消挂载（不删除文件）" disabled={busy} onClick={() => onRemoveExternalLibrary(library.id)} icon={<Trash2 />} />
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {externalCount > 0 && <div className="asset-preprocess-row"><span>外部目录 {externalCount} 个；拖入项目时会复制到工作区</span></div>}
         {greenAssets.length > 0 && (
           <div className="asset-preprocess-row">
             <span>绿幕缓存 {cachedGreenAssets}/{greenAssets.length}</span>
@@ -3235,27 +3395,34 @@ function LocalAssetCard({
 }): JSX.Element {
   const isAudio = asset.type === 'audio'
   const canUseAsAudio = isAudio || hasNativeAudioHint(asset)
+  const unavailable = !assetIsAvailable(asset)
   const badges = assetBadges(asset)
   const [previewActive, setPreviewActive] = useState(false)
   return (
     <article
-      className={`asset-card ${viewMode} risk-${asset.riskLevel}`}
-      draggable
+      className={`asset-card ${viewMode} risk-${asset.riskLevel} ${unavailable ? 'unavailable' : ''}`}
+      draggable={!unavailable}
       tabIndex={0}
       onMouseEnter={() => setPreviewActive(true)}
       onMouseLeave={() => setPreviewActive(false)}
       onFocus={() => setPreviewActive(true)}
       onBlur={() => setPreviewActive(false)}
       onDragStart={(event) => {
+        if (unavailable) {
+          event.preventDefault()
+          return
+        }
         event.dataTransfer.setData('application/x-cat-meme-asset', asset.id)
         event.dataTransfer.setData('text/plain', asset.id)
         event.dataTransfer.effectAllowed = 'copy'
       }}
       onContextMenu={(event) => {
         event.preventDefault()
-        onAdd(asset)
+        if (!unavailable) onAdd(asset)
       }}
-      onDoubleClick={() => onAdd(asset)}
+      onDoubleClick={() => {
+        if (!unavailable) onAdd(asset)
+      }}
       title="拖到预览画面或时间轴；右键加入当前帧"
     >
       <div className="asset-thumb-wrap">
@@ -3285,18 +3452,18 @@ function LocalAssetCard({
         {viewMode === 'list' && <span>{asset.license}</span>}
       </div>
       <div className="asset-actions">
-        <IconButton title={isAudio ? '加入音频轨' : '加入画面'} onClick={() => onAdd(asset)} icon={isAudio ? <Music2 /> : <ImageIcon />} />
+        <IconButton title={isAudio ? '加入音频轨' : '加入画面'} disabled={unavailable} onClick={() => onAdd(asset)} icon={isAudio ? <Music2 /> : <ImageIcon />} />
         {!isAudio && (
           <>
-            <button className="asset-quick" onClick={() => onAddToPurpose(asset, 'background')}>
+            <button className="asset-quick" disabled={unavailable} onClick={() => onAddToPurpose(asset, 'background')}>
               背景
             </button>
-            <button className="asset-quick" onClick={() => onAddToPurpose(asset, 'role')}>
+            <button className="asset-quick" disabled={unavailable} onClick={() => onAddToPurpose(asset, 'role')}>
               角色
             </button>
           </>
         )}
-        <button className="asset-quick" disabled={!canUseAsAudio} onClick={() => onAddToPurpose(asset, 'audio')}>
+        <button className="asset-quick" disabled={unavailable || !canUseAsAudio} onClick={() => onAddToPurpose(asset, 'audio')}>
           音频
         </button>
         <IconButton title="查看文件位置" onClick={() => void onShowFile(asset)} icon={<FolderOpen />} />
@@ -5423,8 +5590,8 @@ function Timeline({
   onRazorModeChange: (value: boolean) => void
   onCutItemAtFrame: (itemId: string, frame: number) => void
   onItemContextMenu: (id: string, clientX: number, clientY: number) => void
-  onDropAsset: (assetId: string, trackId: string, frame: number) => boolean
-  onDropAssetToDefaultTrack: (assetId: string, frame: number) => boolean
+  onDropAsset: (assetId: string, trackId: string, frame: number) => void
+  onDropAssetToDefaultTrack: (assetId: string, frame: number) => void
 }): JSX.Element {
   const [dragState, setDragState] = useState<{
     mode: 'move' | 'rate-start' | 'rate-end'
@@ -7370,9 +7537,9 @@ function CustomPresetPanel({ preset, onChange }: { preset: ExportPreset; onChang
   )
 }
 
-function IconButton({ title, icon, onClick }: { title: string; icon: JSX.Element; onClick: () => void | Promise<void> }): JSX.Element {
+function IconButton({ title, icon, onClick, disabled = false }: { title: string; icon: JSX.Element; onClick: () => void | Promise<void>; disabled?: boolean }): JSX.Element {
   return (
-    <button type="button" className="icon-button" title={title} onClick={() => void onClick()}>
+    <button type="button" className="icon-button" title={title} disabled={disabled} onClick={() => void onClick()}>
       {icon}
     </button>
   )
@@ -7668,6 +7835,7 @@ function Metric({ label, value }: { label: string; value: string }): JSX.Element
 function providerName(provider: AssetProvider): string {
   const names: Record<AssetProvider, string> = {
     local: '本地',
+    external: '外部目录',
     pexels: 'Pexels',
     pixabay: 'Pixabay',
     openverse: 'Openverse',
@@ -8258,6 +8426,20 @@ function isVisualAsset(asset: Asset): boolean {
   return ['image', 'video', 'gif'].includes(asset.type)
 }
 
+function assetSourceKind(asset: Asset): AssetSourceFilter {
+  if (asset.source?.kind === 'external' || asset.provider === 'external') return 'external'
+  if (asset.source?.kind === 'bundled' || asset.sourceUrl?.startsWith('bundled://')) return 'bundled'
+  return 'managed'
+}
+
+function isExternalAsset(asset: Asset): boolean {
+  return assetSourceKind(asset) === 'external'
+}
+
+function assetIsAvailable(asset: Asset): boolean {
+  return !asset.availability || asset.availability === 'available'
+}
+
 function filterLocalAssets(assets: Asset[], filter: LocalAssetFilter): Asset[] {
   const tokens = textToTokens(filter.query.toLowerCase())
   const subcategory = ASSET_SUBCATEGORIES[filter.primaryCategory]?.find((item) => item.id === filter.subCategory)
@@ -8267,9 +8449,10 @@ function filterLocalAssets(assets: Asset[], filter: LocalAssetFilter): Asset[] {
       const haystack = assetSearchText(asset)
       const matchesQuery = tokens.every((token) => haystack.includes(token))
       const matchesType = filter.typeFilter === 'all' || asset.type === filter.typeFilter
+      const matchesSource = filter.sourceFilter === 'all' || assetSourceKind(asset) === filter.sourceFilter
       const matchesPrimary = assetMatchesPrimaryCategory(asset, filter.primaryCategory)
       const matchesSubcategory = assetMatchesSubcategory(asset, subcategory)
-      return matchesQuery && matchesType && matchesPrimary && matchesSubcategory
+      return matchesQuery && matchesType && matchesSource && matchesPrimary && matchesSubcategory
     })
     .sort((a, b) => compareAssets(a, b, filter.sortMode))
 }
@@ -8334,6 +8517,8 @@ function countAssetsForCategory(assets: Asset[], category: AssetPrimaryCategory)
 
 function assetBadges(asset: Asset): string[] {
   const badges = [assetTypeName(asset.type)]
+  if (assetSourceKind(asset) === 'external') badges.push(asset.availability === 'available' ? '外部' : asset.availability === 'offline' ? '离线' : '丢失')
+  if (assetSourceKind(asset) === 'bundled') badges.push('内置')
   if (isGreenScreenAsset(asset)) badges.push('绿幕')
   if (greenAlphaVariant(asset)) badges.push('透明缓存')
   if (hasNativeAudioHint(asset)) badges.push('有声')

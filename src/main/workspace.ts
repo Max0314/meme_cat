@@ -52,6 +52,14 @@ export function assetIndexPath(info = getWorkspaceInfo()): string {
   return path.join(info.dataDir, 'assets.index.json')
 }
 
+export function assetLibrariesPath(info = getWorkspaceInfo()): string {
+  return path.join(info.dataDir, 'asset-libraries.json')
+}
+
+export function externalAssetIndexPath(info = getWorkspaceInfo()): string {
+  return path.join(info.dataDir, 'external-assets.index.json')
+}
+
 export function defaultSettings(info = getWorkspaceInfo()): AppSettings {
   return {
     workspaceRoot: info.root,

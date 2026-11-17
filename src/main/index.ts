@@ -15,6 +15,16 @@ import {
   searchAssets,
   updateAssetMetadata
 } from './assetService'
+import {
+  addAssetLibrary,
+  externalAssetLibraryRoots,
+  loadAssetLibraries,
+  loadExternalAssetIndex,
+  materializeExternalAsset,
+  removeAssetLibrary,
+  scanAssetLibrary,
+  updateExternalAssetMetadata
+} from './assetLibraryService'
 import { generateScript, synthesizeTts } from './aiService'
 import { readJson, writeJson } from './jsonStore'
 import { renderProject } from './renderService'
@@ -93,7 +103,8 @@ function registerIpc(): void {
 
   ipcMain.handle('asset.list', async () => {
     const info = await ensureWorkspace()
-    return loadAssetIndex(info)
+    const [managedAssets, externalAssets] = await Promise.all([loadAssetIndex(info), loadExternalAssetIndex(info)])
+    return [...managedAssets, ...externalAssets]
   })
   ipcMain.handle('asset.search', async (_event, request) => searchAssets(request, settings))
   ipcMain.handle('asset.download', async (_event, request) => {
@@ -119,7 +130,39 @@ function registerIpc(): void {
   })
   ipcMain.handle('asset.update', async (_event, assetId: string, patch: AssetMetadataPatch) => {
     const info = await ensureWorkspace()
-    return updateAssetMetadata(info, assetId, patch)
+    try {
+      return await updateAssetMetadata(info, assetId, patch)
+    } catch (error) {
+      const externalAsset = await updateExternalAssetMetadata(info, assetId, patch)
+      if (externalAsset) return externalAsset
+      throw error
+    }
+  })
+  ipcMain.handle('asset.materialize', async (_event, assetId: string) => {
+    const info = await ensureWorkspace()
+    return materializeExternalAsset(info, assetId)
+  })
+  ipcMain.handle('assetLibrary.list', async () => {
+    const info = await ensureWorkspace()
+    return loadAssetLibraries(info)
+  })
+  ipcMain.handle('assetLibrary.addFolder', async () => {
+    const dialogOptions: OpenDialogOptions = {
+      title: '添加外部素材库文件夹',
+      properties: ['openDirectory']
+    }
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, dialogOptions) : await dialog.showOpenDialog(dialogOptions)
+    if (result.canceled || !result.filePaths[0]) return null
+    const info = await ensureWorkspace()
+    return addAssetLibrary(info, result.filePaths[0])
+  })
+  ipcMain.handle('assetLibrary.scan', async (_event, libraryId: string) => {
+    const info = await ensureWorkspace()
+    return scanAssetLibrary(info, libraryId)
+  })
+  ipcMain.handle('assetLibrary.remove', async (_event, libraryId: string) => {
+    const info = await ensureWorkspace()
+    return removeAssetLibrary(info, libraryId)
   })
   ipcMain.handle('asset.waveform', async (_event, assetId: string) => {
     const info = await ensureWorkspace()
@@ -219,8 +262,10 @@ function registerIpc(): void {
 async function resolveSafeUserPath(filePath: string): Promise<string> {
   const info = await ensureWorkspace()
   const resolved = path.resolve(filePath || '')
+  const externalRoots = await externalAssetLibraryRoots(info)
   const roots = [
     info.root,
+    ...externalRoots,
     settings?.defaultExportDir,
     app.getPath('documents'),
     app.getPath('downloads'),

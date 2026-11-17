@@ -1,5 +1,6 @@
 export type AssetProvider =
   | 'local'
+  | 'external'
   | 'pexels'
   | 'pixabay'
   | 'openverse'
@@ -35,6 +36,24 @@ export interface AssetProcessedVariant {
   visibleBounds?: VisibleBounds
 }
 
+export type AssetSourceKind = 'managed' | 'external' | 'bundled'
+
+export type AssetAvailability = 'available' | 'missing' | 'offline' | 'unsupported'
+
+export interface AssetSourceFingerprint {
+  size: number
+  mtimeMs: number
+}
+
+export interface AssetSourceInfo {
+  kind: AssetSourceKind
+  libraryId?: string
+  rootPath?: string
+  relativePath?: string
+  originalPath?: string
+  fingerprint?: AssetSourceFingerprint
+}
+
 export interface Asset {
   id: string
   type: AssetType
@@ -56,6 +75,29 @@ export interface Asset {
   useCount?: number
   fileUrl?: string
   processedVariants?: AssetProcessedVariant[]
+  source?: AssetSourceInfo
+  availability?: AssetAvailability
+}
+
+export interface AssetLibrarySource {
+  id: string
+  name: string
+  rootPath: string
+  enabled: boolean
+  defaultUseMode: 'copy-on-use' | 'direct-reference'
+  createdAt: string
+  lastScannedAt?: string
+  lastScanError?: string
+}
+
+export interface AssetLibraryScanResult {
+  source: AssetLibrarySource
+  assets: Asset[]
+  added: number
+  updated: number
+  missing: number
+  skipped: number
+  warnings: string[]
 }
 
 export interface AssetMetadataPatch {
