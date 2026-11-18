@@ -1,0 +1,39 @@
+services:
+  web:
+    image: fribench-cat-meme-studio:${CAT_MEME_VERSION:?Set CAT_MEME_VERSION}
+    build:
+      context: ../..
+      dockerfile: deploy/fribench/Dockerfile
+    ports:
+      - "127.0.0.1:24010:8080"
+    volumes:
+      - type: bind
+        source: ${CAT_MEME_DOWNLOADS:?Set CAT_MEME_DOWNLOADS}
+        target: /usr/share/nginx/html/downloads
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    cpus: 0.5
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '2'}
+    networks: [edge]
+networks:
+  edge:
+    name: fribench-cat-meme-studio-edge-v1
+    ipam:
+      config:
+        - subnet: 10.254.236.0/28

@@ -1,0 +1,9 @@
+**
+!site/
+!site/index.html
+!site/site.css
+!site/favicon.svg
+!deploy/
+!deploy/fribench/
+!deploy/fribench/Dockerfile
+!deploy/fribench/nginx.conf
