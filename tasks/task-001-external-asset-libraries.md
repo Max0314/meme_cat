@@ -50,6 +50,6 @@ Remove the new external library config/cache files from `data/` and revert the s
 
 ## 2026-11-17 WIP preservation
 
-The user chose to commit and push this unfinished implementation as WIP and defer feature acceptance. It is not merged into main. `npm.cmd run verify` passed: main/renderer TypeScript checks, workflow-file verification, and the Electron/Vite application build. The test script checks workflow scaffolding; it is not an asset-library functional test.
+The user chose to commit and push this unfinished implementation as WIP and defer feature acceptance. The user approved merging the implementation into `main` on 2026-11-18. The earlier checks below still apply. The user will handle remaining feature acceptance. `npm.cmd run verify` passed: main/renderer TypeScript checks, workflow-file verification, and the Electron/Vite application build. The test script checks workflow scaffolding; it is not an asset-library functional test.
 
 Still required: test read-only scanning, path/protocol validation, missing/offline sources, large/nested/non-ASCII folders, source removal and copy-on-use; perform the manual project/timeline smoke test above. Preserve all existing assets, projects, exports and external source folders. No editor or user media was opened or modified by this cleanup.
