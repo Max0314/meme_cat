@@ -11,8 +11,10 @@ import type {
   AssetType,
   WorkspaceInfo
 } from '../shared/types'
-import { assetIndexPath, assetLibrariesPath, externalAssetIndexPath } from './workspace'
-import { readJson, writeJson } from './jsonStore'
+import { assetLibrariesPath, externalAssetIndexPath } from './workspace'
+import { loadAssetIndex, updateAssetIndex } from './assetService'
+import { readJson, withJsonTransaction, writeJson } from './jsonStore'
+import { isPathInside } from './pathSafety'
 
 const MAX_WARNINGS = 24
 const IGNORED_FILES = new Set(['thumbs.db', '.ds_store'])
@@ -33,6 +35,10 @@ export async function loadAssetLibraries(info: WorkspaceInfo): Promise<AssetLibr
 }
 
 export async function addAssetLibrary(info: WorkspaceInfo, rootPath: string): Promise<AssetLibraryScanResult> {
+  return withJsonTransaction(assetLibrariesPath(info), () => addAssetLibraryUnlocked(info, rootPath))
+}
+
+async function addAssetLibraryUnlocked(info: WorkspaceInfo, rootPath: string): Promise<AssetLibraryScanResult> {
   const resolvedRoot = path.resolve(rootPath)
   const rootInfo = await stat(resolvedRoot)
   if (!rootInfo.isDirectory()) throw new Error('请选择素材文件夹')
@@ -49,10 +55,14 @@ export async function addAssetLibrary(info: WorkspaceInfo, rootPath: string): Pr
     createdAt: new Date().toISOString()
   }
   await saveAssetLibraries(info, [...sources, source])
-  return scanAssetLibrary(info, source.id)
+  return scanAssetLibraryUnlocked(info, source.id)
 }
 
 export async function removeAssetLibrary(info: WorkspaceInfo, libraryId: string): Promise<AssetLibrarySource[]> {
+  return withJsonTransaction(assetLibrariesPath(info), () => removeAssetLibraryUnlocked(info, libraryId))
+}
+
+async function removeAssetLibraryUnlocked(info: WorkspaceInfo, libraryId: string): Promise<AssetLibrarySource[]> {
   const sources = await loadAssetLibraries(info)
   const nextSources = sources.filter((source) => source.id !== libraryId)
   await saveAssetLibraries(info, nextSources)
@@ -66,6 +76,10 @@ export async function removeAssetLibrary(info: WorkspaceInfo, libraryId: string)
 }
 
 export async function scanAssetLibrary(info: WorkspaceInfo, libraryId: string): Promise<AssetLibraryScanResult> {
+  return withJsonTransaction(assetLibrariesPath(info), () => scanAssetLibraryUnlocked(info, libraryId))
+}
+
+async function scanAssetLibraryUnlocked(info: WorkspaceInfo, libraryId: string): Promise<AssetLibraryScanResult> {
   const sources = await loadAssetLibraries(info)
   const source = sources.find((item) => item.id === libraryId)
   if (!source) throw new Error('外部素材库不存在')
@@ -103,8 +117,8 @@ export async function scanAssetLibrary(info: WorkspaceInfo, libraryId: string): 
     const relativeKey = normalizeRelativePath(file.relativePath)
     const existing = existingByRelativePath.get(relativeKey)
     seen.add(relativeKey)
-    if (existing) updated += 1
-    else added += 1
+    if (existing && (!sameFingerprint(existing.source?.fingerprint, file) || existing.availability !== 'available')) updated += 1
+    else if (!existing) added += 1
 
     const fingerprint: AssetSourceFingerprint = { size: file.size, mtimeMs: file.mtimeMs }
     const tags = deriveDirectoryTags(source, file)
@@ -179,6 +193,10 @@ export async function updateExternalAssetMetadata(
   assetId: string,
   patch: AssetMetadataPatch
 ): Promise<Asset | null> {
+  return withJsonTransaction(assetLibrariesPath(info), () => updateExternalAssetMetadataUnlocked(info, assetId, patch))
+}
+
+async function updateExternalAssetMetadataUnlocked(info: WorkspaceInfo, assetId: string, patch: AssetMetadataPatch): Promise<Asset | null> {
   const assets = await readJson<Asset[]>(externalAssetIndexPath(info), [])
   const index = assets.findIndex((asset) => asset.id === assetId)
   if (index < 0) return null
@@ -195,20 +213,28 @@ export async function updateExternalAssetMetadata(
 }
 
 export async function materializeExternalAsset(info: WorkspaceInfo, assetId: string): Promise<Asset> {
-  const externalAssets = await loadExternalAssetIndex(info)
+  return withJsonTransaction(assetLibrariesPath(info), () => materializeExternalAssetUnlocked(info, assetId))
+}
+
+async function materializeExternalAssetUnlocked(info: WorkspaceInfo, assetId: string): Promise<Asset> {
+  const externalAssets = await readJson<Asset[]>(externalAssetIndexPath(info), [])
   const sourceAsset = externalAssets.find((asset) => asset.id === assetId)
   if (!sourceAsset || sourceAsset.source?.kind !== 'external') throw new Error('外部素材不存在')
-  if (sourceAsset.availability !== 'available' || !existsSync(sourceAsset.localPath)) {
+  const sources = await loadAssetLibraries(info)
+  const library = sources.find((source) => source.enabled && source.id === sourceAsset.source?.libraryId)
+  if (!library || !existsSync(library.rootPath) || !existsSync(sourceAsset.localPath)) {
     throw new Error('外部素材文件不可用，请重新扫描或定位素材库')
   }
 
-  const workspaceAssets = await readJson<Asset[]>(assetIndexPath(info), [])
+  const currentInfo = await stat(sourceAsset.localPath)
+  const fingerprint = { size: currentInfo.size, mtimeMs: currentInfo.mtimeMs }
+  const workspaceAssets = await loadAssetIndex(info)
   const reusable = workspaceAssets.find(
     (asset) =>
       existsSync(asset.localPath) &&
       asset.source?.kind === 'managed' &&
       asset.source.originalPath === sourceAsset.localPath &&
-      sameFingerprint(asset.source.fingerprint, sourceAsset.source?.fingerprint)
+      sameFingerprint(asset.source.fingerprint, fingerprint)
   )
   if (reusable) return withManagedFileUrl(reusable)
 
@@ -217,7 +243,6 @@ export async function materializeExternalAsset(info: WorkspaceInfo, assetId: str
   const filename = uniqueFilename(sourceAsset.filename)
   const localPath = path.join(targetDir, filename)
   await copyFile(sourceAsset.localPath, localPath)
-  const copiedInfo = await stat(localPath)
 
   const asset: Asset = {
     ...sourceAsset,
@@ -240,14 +265,11 @@ export async function materializeExternalAsset(info: WorkspaceInfo, assetId: str
       libraryId: sourceAsset.source.libraryId,
       rootPath: sourceAsset.source.rootPath,
       relativePath: sourceAsset.source.relativePath,
-      fingerprint: sourceAsset.source.fingerprint || {
-        size: copiedInfo.size,
-        mtimeMs: copiedInfo.mtimeMs
-      }
+      fingerprint
     }
   }
 
-  await writeJson(assetIndexPath(info), [asset, ...workspaceAssets])
+  await updateAssetIndex(info, (assets) => [asset, ...assets])
   return withManagedFileUrl(asset)
 }
 
@@ -289,8 +311,8 @@ async function scanFiles(rootPath: string, warnings: string[]): Promise<{ files:
   const queue = [rootPath]
   let skipped = 0
 
-  while (queue.length) {
-    const currentDir = queue.shift()
+  for (let index = 0; index < queue.length; index += 1) {
+    const currentDir = queue[index]
     if (!currentDir) continue
     let entries: Dirent[]
     try {
@@ -423,11 +445,6 @@ function uniqueFilename(filename: string): string {
   const ext = path.extname(filename)
   const base = sanitizeFilename(path.basename(filename, ext))
   return `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${base}${ext}`
-}
-
-function isPathInside(filePath: string, root: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(filePath))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 function samePath(a: string, b: string): boolean {

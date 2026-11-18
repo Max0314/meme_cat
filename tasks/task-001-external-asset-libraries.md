@@ -53,3 +53,9 @@ Remove the new external library config/cache files from `data/` and revert the s
 The user chose to commit and push this unfinished implementation as WIP and defer feature acceptance. The user approved merging the implementation into `main` on 2026-11-18. The earlier checks below still apply. The user will handle remaining feature acceptance. `npm.cmd run verify` passed: main/renderer TypeScript checks, workflow-file verification, and the Electron/Vite application build. The test script checks workflow scaffolding; it is not an asset-library functional test.
 
 Still required: test read-only scanning, path/protocol validation, missing/offline sources, large/nested/non-ASCII folders, source removal and copy-on-use; perform the manual project/timeline smoke test above. Preserve all existing assets, projects, exports and external source folders. No editor or user media was opened or modified by this cleanup.
+
+## 2026-11-18 follow-up audit
+
+Task 002 adds Node-only temporary-fixture coverage for nested Chinese paths, unsupported files, unchanged scans, concurrent metadata/copies/imports, offline index retention, source removal without deletion and live-fingerprint copy reuse. Renderer action tests cover simultaneous copy insertion and project switching. External scanning, removal and metadata changes now serialize, and copy-on-use no longer stats every external asset. API documentation now includes the external-library bridge.
+
+These checks do not constitute the deferred desktop feature acceptance. Large-library measurement, real-media decoding and the manual application smoke test remain unperformed; no application was launched.

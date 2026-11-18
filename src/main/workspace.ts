@@ -63,6 +63,7 @@ export function externalAssetIndexPath(info = getWorkspaceInfo()): string {
 export function defaultSettings(info = getWorkspaceInfo()): AppSettings {
   return {
     workspaceRoot: info.root,
+    appearance: 'light',
     defaultPresetId: 'douyin-1080p',
     defaultExportDir: info.outputDir,
     openAi: {

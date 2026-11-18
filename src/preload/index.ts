@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { pathToFileURL } from 'node:url'
 import type {
   AiScriptRequest,
+  AiScriptResponse,
   AiTtsRequest,
   AppSettings,
   Asset,
@@ -52,7 +53,7 @@ const api = {
     ipcRenderer.on('asset.preprocessGreenScreenProgress', listener)
     return () => ipcRenderer.removeListener('asset.preprocessGreenScreenProgress', listener)
   },
-  generateScript: (request: AiScriptRequest) => ipcRenderer.invoke('ai.generateScript', request),
+  generateScript: (request: AiScriptRequest): Promise<AiScriptResponse> => ipcRenderer.invoke('ai.generateScript', request),
   tts: (request: AiTtsRequest): Promise<Asset> => ipcRenderer.invoke('ai.tts', request),
   renderPreview: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.preview', request),
   renderExport: (request: RenderRequest): Promise<RenderResult> => ipcRenderer.invoke('render.export', request),

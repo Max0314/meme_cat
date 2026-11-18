@@ -1,6 +1,6 @@
 {
   "name": "cat-meme-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Windows desktop app for generating Chinese cat meme short videos.",
   "main": "out/main/index.js",
   "author": "Cat Meme Studio",
@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "lint": "npm run typecheck",
-    "test": "node scripts/verify-ai-workflow.mjs",
+    "test": "node scripts/verify-ai-workflow.mjs && node --test scripts/test-editor-*.mjs",
     "verify": "npm run lint && npm run test && npm run build:app",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "build:app": "electron-vite build",

@@ -23,7 +23,7 @@ import type {
   WorkspaceInfo
 } from '../shared/types'
 import { assetIndexPath } from './workspace'
-import { readJson, writeJson } from './jsonStore'
+import { readJson, withJsonTransaction, writeJson } from './jsonStore'
 
 interface PexelsPhoto {
   id: number
@@ -88,6 +88,10 @@ const providerLabel: Record<AssetProvider, string> = {
 }
 
 export async function loadAssetIndex(info: WorkspaceInfo): Promise<Asset[]> {
+  return withJsonTransaction(assetIndexPath(info), () => loadAssetIndexUnlocked(info))
+}
+
+async function loadAssetIndexUnlocked(info: WorkspaceInfo): Promise<Asset[]> {
   const [bundledAssets, workspaceAssets] = await Promise.all([
     loadBundledAssetIndex(),
     readJson<Asset[]>(assetIndexPath(info), [])
@@ -100,9 +104,17 @@ export async function loadAssetIndex(info: WorkspaceInfo): Promise<Asset[]> {
   return reconciled.assets.map(withFileUrl)
 }
 
-export async function saveAssetIndex(info: WorkspaceInfo, assets: Asset[]): Promise<void> {
+async function saveAssetIndex(info: WorkspaceInfo, assets: Asset[]): Promise<void> {
   const serializable = assets.map(serializeAsset)
   await writeJson(assetIndexPath(info), serializable)
+}
+
+export async function updateAssetIndex(info: WorkspaceInfo, update: (assets: Asset[]) => Asset[]): Promise<Asset[]> {
+  return withJsonTransaction(assetIndexPath(info), async () => {
+    const nextAssets = update(await loadAssetIndexUnlocked(info))
+    await saveAssetIndex(info, nextAssets)
+    return nextAssets.map(withFileUrl)
+  })
 }
 
 async function loadBundledAssetIndex(): Promise<Asset[]> {
@@ -162,19 +174,16 @@ export function withFileUrl<T extends { localPath?: string }>(value: T): T & { f
 }
 
 export async function updateAssetMetadata(info: WorkspaceInfo, assetId: string, patch: AssetMetadataPatch): Promise<Asset> {
-  const assets = await loadAssetIndex(info)
-  const index = assets.findIndex((asset) => asset.id === assetId)
-  if (index < 0) throw new Error('素材不存在')
-  const nextAsset: Asset = {
-    ...assets[index],
-    favorite: patch.favorite ?? assets[index].favorite,
-    lastUsedAt: patch.lastUsedAt ?? assets[index].lastUsedAt,
-    useCount: patch.useCount ?? assets[index].useCount
-  }
-  const nextAssets = [...assets]
-  nextAssets[index] = nextAsset
-  await saveAssetIndex(info, nextAssets)
-  return withFileUrl(nextAsset)
+  const assets = await updateAssetIndex(info, (current) => {
+    if (!current.some((asset) => asset.id === assetId)) throw new Error('素材不存在')
+    return current.map((asset) => asset.id === assetId ? {
+      ...asset,
+      favorite: patch.favorite ?? asset.favorite,
+      lastUsedAt: patch.lastUsedAt ?? asset.lastUsedAt,
+      useCount: patch.useCount ?? asset.useCount
+    } : asset)
+  })
+  return assets.find((asset) => asset.id === assetId)!
 }
 
 export async function getAssetWaveform(info: WorkspaceInfo, assetId: string): Promise<WaveformData> {
@@ -199,6 +208,10 @@ export async function getAssetWaveform(info: WorkspaceInfo, assetId: string): Pr
 }
 
 export async function cleanupGreenScreenCache(info: WorkspaceInfo): Promise<GreenScreenCacheCleanupResult> {
+  return withJsonTransaction(path.join(info.assetsDir, 'processed', 'green-alpha'), () => cleanupGreenScreenCacheUnlocked(info))
+}
+
+async function cleanupGreenScreenCacheUnlocked(info: WorkspaceInfo): Promise<GreenScreenCacheCleanupResult> {
   const cacheDir = path.join(info.assetsDir, 'processed', 'green-alpha')
   if (!existsSync(cacheDir)) return { deleted: 0, bytes: 0 }
 
@@ -329,13 +342,19 @@ export async function importLocalAsset(info: WorkspaceInfo, filePath: string): P
     }
   }
 
-  const assets = await loadAssetIndex(info)
-  assets.unshift(asset)
-  await saveAssetIndex(info, assets)
+  await updateAssetIndex(info, (assets) => [asset, ...assets])
   return withFileUrl(asset)
 }
 
 export async function preprocessGreenScreenAssets(
+  info: WorkspaceInfo,
+  request: GreenScreenPreprocessRequest,
+  onProgress?: (progress: GreenScreenPreprocessProgress) => void
+): Promise<GreenScreenPreprocessResult> {
+  return withJsonTransaction(path.join(info.assetsDir, 'processed', 'green-alpha'), () => preprocessGreenScreenAssetsUnlocked(info, request, onProgress))
+}
+
+async function preprocessGreenScreenAssetsUnlocked(
   info: WorkspaceInfo,
   request: GreenScreenPreprocessRequest,
   onProgress?: (progress: GreenScreenPreprocessProgress) => void
@@ -426,8 +445,12 @@ export async function preprocessGreenScreenAssets(
     })
   )
 
-  await saveAssetIndex(info, assets)
-  return { assets: assets.map(withFileUrl), success, skipped, failed, errors }
+  const processed = new Map(assets.filter((asset) => assetIds.includes(asset.id)).map((asset) => [asset.id, asset]))
+  const savedAssets = await updateAssetIndex(info, (current) => current.map((asset) => {
+    const result = processed.get(asset.id)
+    return result ? { ...asset, processedVariants: result.processedVariants } : asset
+  }))
+  return { assets: savedAssets, success, skipped, failed, errors }
 }
 
 export async function searchAssets(
@@ -513,9 +536,7 @@ export async function downloadAsset(info: WorkspaceInfo, request: DownloadAssetR
     createdAt: new Date().toISOString()
   }
 
-  const assets = await loadAssetIndex(info)
-  assets.unshift(asset)
-  await saveAssetIndex(info, assets)
+  await updateAssetIndex(info, (assets) => [asset, ...assets])
   return withFileUrl(asset)
 }
 

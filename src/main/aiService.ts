@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AiScriptRequest, AiScriptResponse, AiTtsRequest, AppSettings, Asset, WorkspaceInfo } from '../shared/types'
-import { loadAssetIndex, saveAssetIndex, withFileUrl } from './assetService'
+import { updateAssetIndex, withFileUrl } from './assetService'
 
 export async function generateScript(request: AiScriptRequest, settings: AppSettings): Promise<AiScriptResponse> {
   assertOpenAiReady(settings)
@@ -65,9 +65,7 @@ export async function synthesizeTts(
     fileUrl: pathToFileURL(localPath).toString()
   }
 
-  const assets = await loadAssetIndex(info)
-  assets.unshift(asset)
-  await saveAssetIndex(info, assets)
+  await updateAssetIndex(info, (assets) => [asset, ...assets])
   return withFileUrl(asset)
 }
 
@@ -89,9 +87,15 @@ async function callOpenAiText(prompt: string, settings: AppSettings): Promise<st
   })
 
   if (response.ok) {
-    const data = (await response.json()) as { output_text?: string; output?: unknown }
-    if (data.output_text) return data.output_text
-    return JSON.stringify(data.output)
+    const data = (await response.json()) as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }
+    if (typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text
+    const text = (Array.isArray(data.output) ? data.output : [])
+      .flatMap((message) => Array.isArray(message.content) ? message.content : [])
+      .filter((part) => part.type === 'output_text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('\n')
+    if (!text.trim()) throw new Error('AI 服务没有返回可用的脚本文本')
+    return text
   }
 
   if (response.status !== 404 && response.status !== 400) {

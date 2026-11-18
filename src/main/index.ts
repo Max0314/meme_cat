@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, type OpenDialogOptions } from 'electron'
 import { join } from 'node:path'
 import path from 'node:path'
 import { is } from '@electron-toolkit/utils'
@@ -26,26 +26,30 @@ import {
   updateExternalAssetMetadata
 } from './assetLibraryService'
 import { generateScript, synthesizeTts } from './aiService'
-import { readJson, writeJson } from './jsonStore'
+import { readJson, withJsonTransaction, writeJson } from './jsonStore'
+import { saveProjectFile } from './projectService'
+import { resolveAllowedUserPath } from './pathSafety'
 import { renderProject } from './renderService'
-import { defaultSettings, ensureWorkspace, projectPath, settingsPath } from './workspace'
+import { defaultSettings, ensureWorkspace, settingsPath } from './workspace'
 import { exportDemoVideo, exportResourceDemoVideo } from './demoProject'
 
 let mainWindow: BrowserWindow | null = null
 let settings: AppSettings
 
 function createWindow(): void {
+  const dark = settings.appearance === 'dark'
+  nativeTheme.themeSource = dark ? 'dark' : 'light'
   mainWindow = new BrowserWindow({
     width: 1520,
     height: 960,
     minWidth: 1180,
     minHeight: 760,
-    backgroundColor: '#f4f6f9',
+    backgroundColor: dark ? '#101319' : '#f4f6f9',
     title: 'Cat Meme Studio',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#f4f6f9',
-      symbolColor: '#17202e',
+      color: dark ? '#171c24' : '#f4f6f9',
+      symbolColor: dark ? '#e5eaf2' : '#17202e',
       height: 42
     },
     show: false,
@@ -74,18 +78,20 @@ function registerIpc(): void {
 
   ipcMain.handle('settings.get', async () => settings)
   ipcMain.handle('settings.save', async (_event, nextSettings: AppSettings) => {
-    settings = { ...nextSettings }
-    await writeJson(settingsPath(), settings)
-    return settings
+    return withJsonTransaction(settingsPath(), async () => {
+      await writeJson(settingsPath(), nextSettings)
+      settings = { ...nextSettings }
+      const dark = settings.appearance === 'dark'
+      nativeTheme.themeSource = dark ? 'dark' : 'light'
+      mainWindow?.setTitleBarOverlay({ color: dark ? '#171c24' : '#f4f6f9', symbolColor: dark ? '#e5eaf2' : '#17202e' })
+      return settings
+    })
   })
 
   ipcMain.handle('project.new', async () => createDefaultProject())
   ipcMain.handle('project.save', async (_event, project: ProjectFile) => {
     const info = await ensureWorkspace()
-    const nextProject = { ...project, updatedAt: new Date().toISOString(), workspaceRoot: info.root }
-    const filePath = projectPath(nextProject.title, info)
-    await writeJson(filePath, nextProject)
-    return { project: nextProject, filePath }
+    return saveProjectFile(info, project)
   })
   ipcMain.handle('project.load', async () => {
     const info = await ensureWorkspace()
@@ -261,7 +267,6 @@ function registerIpc(): void {
 
 async function resolveSafeUserPath(filePath: string): Promise<string> {
   const info = await ensureWorkspace()
-  const resolved = path.resolve(filePath || '')
   const externalRoots = await externalAssetLibraryRoots(info)
   const roots = [
     info.root,
@@ -272,15 +277,7 @@ async function resolveSafeUserPath(filePath: string): Promise<string> {
     app.getPath('desktop'),
     app.getPath('videos')
   ].filter((value): value is string => Boolean(value))
-  if (!roots.some((root) => isPathInside(resolved, path.resolve(root)))) {
-    throw new Error('不允许打开工作区之外的路径')
-  }
-  return resolved
-}
-
-function isPathInside(filePath: string, root: string): boolean {
-  const relative = path.relative(root, filePath)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+  return resolveAllowedUserPath(filePath, roots)
 }
 
 async function createDefaultProject(): Promise<ProjectFile> {

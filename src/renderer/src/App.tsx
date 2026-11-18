@@ -22,6 +22,7 @@
   MousePointer2,
   Move,
   Music2,
+  Moon,
   Pause,
   Play,
   Plus,
@@ -39,6 +40,7 @@
   StepBack,
   StepForward,
   Sticker,
+  Sun,
   Trash2,
   Type,
   Unlock,
@@ -49,6 +51,10 @@
 } from 'lucide-react'
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+import { advancePlayback, changedLockedTrack, isGreenScreenProcessing, projectContentKey, reconcileSavedProject } from './editorSession'
+import { EXPORT_PRESETS } from '../../shared/presets'
+import { AssistantPanel, type AssistantState } from './AssistantPanel'
+import { readAudioDuration } from './mediaMetadata'
 import type {
   AppSettings,
   Asset,
@@ -112,7 +118,6 @@ import type {
   EditorToolId,
   LocalAssetFilter,
   MemeActionId,
-  RightTab,
   SubtitleStyleScope,
   SubtitleSyncMode,
   SubtitleTimingMode,
@@ -217,7 +222,17 @@ const MAX_PLAYBACK_RATE = 4
 function App(): JSX.Element {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
+  const [savingSettings, setSavingSettings] = useState(false)
   const [project, setProject] = useState<ProjectFile | null>(null)
+  const [pendingProjectAction, setPendingProjectAction] = useState<'new' | 'load' | 'close' | null>(null)
+  const savedProjectKeyRef = useRef('')
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null)
+  const allowCloseRef = useRef(false)
+  const projectActionInFlightRef = useRef(false)
+  const projectSessionRef = useRef(0)
+  const assistantOperationRef = useRef(false)
+  const [assistantBusy, setAssistantBusy] = useState<'script' | 'voice' | 'template' | null>(null)
+  const [assistant, setAssistant] = useState<AssistantState>({ tab: 'script', topic: '猫猫上班第一天就想离职', seconds: 14, templateId: '', draft: null, voiceText: '', voice: '', assetQuery: '', assetIds: [] })
   const [presets, setPresets] = useState<ExportPreset[]>([])
   const [templates, setTemplates] = useState<CatMemeTemplate[]>([])
   const [localAssets, setLocalAssets] = useState<Asset[]>([])
@@ -245,13 +260,12 @@ function App(): JSX.Element {
   const [activeTool, setActiveTool] = useState<EditorToolId>('select')
   const [activeTrackGroup, setActiveTrackGroup] = useState<TrackGroupFilter>('all')
   const [soloTrackGroup, setSoloTrackGroup] = useState<TrackGroupId | null>(null)
-  const [toolDrawer, setToolDrawer] = useState<'export' | 'settings' | null>(null)
+  const [toolDrawer, setToolDrawer] = useState<'export' | 'settings' | 'assistant' | null>(null)
   const [contextMenu, setContextMenu] = useState<TimelineContextMenu | null>(null)
   const [contextInput, setContextInput] = useState<ContextInputDialog | null>(null)
   const contextInputRef = useRef<HTMLInputElement | null>(null)
   const [showShortcutHelp, setShowShortcutHelp] = useState(false)
   const [clipClipboard, setClipClipboard] = useState<TimelineItem | null>(null)
-  const [rightTab, setRightTab] = useState<RightTab>('templates')
   const [preview, setPreview] = useState<RenderResult | null>(null)
   const [lastExport, setLastExport] = useState<RenderResult | null>(null)
   const [lastCover, setLastCover] = useState<RenderResult | null>(null)
@@ -259,7 +273,6 @@ function App(): JSX.Element {
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null)
   const [busy, setBusy] = useState<string | null>('启动中')
   const [notice, setNotice] = useState('正在初始化应用...')
-  const [aiTopic, setAiTopic] = useState('猫猫上班第一天就想离职')
   const [quickSubtitleText, setQuickSubtitleText] = useState('')
   const [quickSubtitleSeconds, setQuickSubtitleSeconds] = useState(2.8)
   const quickSubtitleInputRef = useRef<HTMLInputElement | null>(null)
@@ -269,10 +282,15 @@ function App(): JSX.Element {
   const canUndo = undoStack.length > 0
   const canRedo = redoStack.length > 0
   const razorMode = activeTool === 'razor'
+  const hasUnsavedChanges = useMemo(() => Boolean(project && projectContentKey(project) !== savedProjectKeyRef.current), [project])
 
   useEffect(() => {
     void boot()
   }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings?.appearance === 'dark' ? 'dark' : 'light'
+  }, [settings?.appearance])
 
   useEffect(() => {
     projectRef.current = project
@@ -369,11 +387,9 @@ function App(): JSX.Element {
   )
 
   const timelineLookup = useMemo(() => (project ? createTimelineLookup(project) : null), [project])
+  const availableAssets = useMemo(() => mergeAssets(project?.assets || [], localAssets), [project?.assets, localAssets])
 
-  const previewTrackGroup = useMemo<TrackGroupId | null>(
-    () => soloTrackGroup || (activeTrackGroup === 'all' ? null : activeTrackGroup),
-    [activeTrackGroup, soloTrackGroup]
-  )
+  const previewTrackGroup = soloTrackGroup
 
   const activeVisualItems = useMemo(
     () => findActiveVisualItems(timelineLookup, playheadFrame, previewTrackGroup),
@@ -447,13 +463,15 @@ function App(): JSX.Element {
   useEffect(() => {
     if (!isPlaying || !currentPreset) return
     let lastTick = performance.now()
+    let remainder = 0
     const interval = window.setInterval(() => {
       const now = performance.now()
-      const elapsed = Math.max(16, now - lastTick)
+      const step = advancePlayback(now - lastTick, currentPreset.fps, playerSpeed, remainder)
+      remainder = step.remainder
       lastTick = now
+      if (!step.frames) return
       setPlayheadFrame((frame) => {
-        const step = Math.max(1, Math.round((elapsed / 1000) * currentPreset.fps * playerSpeed))
-        const nextFrame = Math.min(totalFrames, frame + step)
+        const nextFrame = Math.min(totalFrames, frame + step.frames)
         if (nextFrame >= totalFrames) {
           window.setTimeout(() => setIsPlaying(false), 0)
         }
@@ -511,6 +529,12 @@ function App(): JSX.Element {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
       if (event.isComposing) return
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') {
+        event.preventDefault()
+        void saveProject()
+        return
+      }
+      if (pendingProjectAction) return
       if (isTypingTarget(event.target)) return
 
       if ((event.ctrlKey || event.metaKey) && event.code === 'KeyZ') {
@@ -585,9 +609,6 @@ function App(): JSX.Element {
       } else if (event.code === 'Delete' || event.code === 'Backspace') {
         event.preventDefault()
         if (!deleteSelectedCue()) deleteSelectedItem()
-      } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') {
-        event.preventDefault()
-        void saveProject()
       } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyD') {
         event.preventDefault()
         duplicateSelectedItem()
@@ -637,7 +658,19 @@ function App(): JSX.Element {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, canRedo, canUndo, clipClipboard, isPlaying, playheadFrame, project, selectedCue, selectedItem, totalFrames])
+  }, [activeTool, canRedo, canUndo, clipClipboard, isPlaying, pendingProjectAction, playheadFrame, project, selectedCue, selectedItem, totalFrames])
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (allowCloseRef.current || !hasUnsavedProjectChanges()) return
+      event.preventDefault()
+      event.returnValue = ''
+      setIsPlaying(false)
+      setPendingProjectAction('close')
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
 
   async function importLocalAssets(): Promise<void> {
     try {
@@ -671,12 +704,14 @@ function App(): JSX.Element {
         keying: { enabled: true, color: '#00ff00', similarity: 0.24, blend: 0.08 }
       })
       const normalizedAssets = normalizeAssets(result.assets)
-      setLocalAssets(normalizedAssets)
+      setLocalAssets((current) => mergeAssets(current, normalizedAssets))
+      setPreprocessProgress({ total: assetIds.length, current: assetIds.length, success: result.success, skipped: result.skipped, failed: result.failed, status: result.failed === assetIds.length ? 'failed' : 'done' })
       commitProjectUpdate((current) => ({ ...current, assets: mergeAssets(current.assets, normalizedAssets) }), {
         label: '更新绿幕缓存'
       })
       setNotice(`透明缓存完成：成功 ${result.success}，跳过 ${result.skipped}，失败 ${result.failed}`)
     } catch (error) {
+      setPreprocessProgress(null)
       setNotice(errorText(error))
     } finally {
       setBusy(null)
@@ -752,10 +787,15 @@ function App(): JSX.Element {
       return null
     }
     try {
+      const projectId = projectRef.current?.id
       setBusy('复制外部素材')
       const materialized = normalizeAsset(await window.catMeme.materializeAsset(asset.id))
       if (!materialized) return null
       setLocalAssets((current) => mergeAssets([materialized], current))
+      if (projectRef.current?.id !== projectId) {
+        setNotice('素材已复制到工作区；工程已切换，未加入当前时间线')
+        return null
+      }
       setNotice(`已复制到工作区：${assetDisplayName(materialized)}`)
       return materialized
     } catch (error) {
@@ -865,6 +905,8 @@ function App(): JSX.Element {
   }
 
   function addRoleStateToTimelineAt(asset: Asset, track: TimelineTrack, startFrame: number): boolean {
+    const project = projectRef.current
+    const currentPreset = project ? presetForProject(project) : undefined
     if (!project || !currentPreset) return false
     const totalFrames = projectDurationFrames(project, currentPreset.fps)
     const roles = projectRoles(project)
@@ -935,6 +977,8 @@ function App(): JSX.Element {
     transformOverride?: Partial<ReturnType<typeof normalizeTransform>>,
     options: { allowAutoTrack?: boolean } = {}
   ): boolean {
+    const project = projectRef.current
+    const currentPreset = project ? presetForProject(project) : undefined
     if (!project || !currentPreset) return false
     const requestedTrack = project.tracks.find((track) => track.id === trackId)
     const fallbackTrackId = trackIdForAssetDrop(project, asset, selectedItem, undefined, activeTool)
@@ -1042,55 +1086,70 @@ function App(): JSX.Element {
     }
   }
 
-  function applyTemplate(template: CatMemeTemplate): void {
-    if (!project || !currentPreset) return
-    const visuals = project.assets.filter((asset) => ['image', 'video', 'gif'].includes(asset.type))
-    if (!visuals.length) {
-      setNotice('请先导入或下载至少一个猫图/猫视频素材')
+  async function applyTemplate(template: CatMemeTemplate): Promise<void> {
+    const origin = projectRef.current
+    if (!origin || assistantOperationRef.current) return
+    const selected = assistant.assetIds.map((id) => availableAssets.find((asset) => asset.id === id))
+    if (!selected.length || selected.some((asset) => !asset || !assetIsAvailable(asset))) {
+      setNotice('请选择可用的画面素材')
       return
     }
-
-    const lines = scriptLines(project.script)
-    let cursor = 0
-    const timeline: TimelineItem[] = []
-    template.defaultSceneSeconds.forEach((seconds, index) => {
-      const asset = visuals[index % visuals.length]
-      const durationFrames = Math.max(1, Math.round(seconds * currentPreset.fps))
-      timeline.push({
-        id: crypto.randomUUID(),
-        trackId: 'visual-main',
-        assetId: asset.id,
-        type: 'visual',
-        label: `${template.name} ${index + 1}`,
-        startFrame: cursor,
-        durationFrames,
-        sourceInFrame: 0,
-        effects: [template.effects[index % template.effects.length] || DEFAULT_EFFECTS[0]],
-        transform: { x: 0, y: 0, scale: 1, rotation: 0, flipX: false, flipY: false, opacity: 1 }
+    const session = projectSessionRef.current
+    const startSeconds = playheadFrame / presetForProject(origin).fps
+    assistantOperationRef.current = true
+    setAssistantBusy('template')
+    try {
+      const visuals: Asset[] = []
+      for (const source of selected) {
+        const asset = await ensureManagedAsset(source!)
+        if (!asset) return
+        visuals.push(asset)
+      }
+      const current = projectRef.current
+      if (!current || projectSessionRef.current !== session) {
+        setNotice('工程已切换，素材保留在素材库，未插入分镜')
+        return
+      }
+      const preset = presetForProject(current)
+      const startFrame = Math.round(startSeconds * preset.fps)
+      const lines = scriptLines(current.script)
+      const tracks: TimelineTrack[] = []
+      const visualTracks = new Map<TrackGroupId, TimelineTrack>()
+      const subtitleTrack: TimelineTrack = { id: crypto.randomUUID(), name: `${template.name} 字幕`, kind: 'subtitle', groupId: 'subtitle', muted: false, locked: false }
+      const timeline: TimelineItem[] = []
+      let cursor = startFrame
+      template.defaultSceneSeconds.forEach((seconds, index) => {
+        const asset = visuals[index % visuals.length]
+        const groupId = visualTargetGroupForAsset(asset)
+        let track = visualTracks.get(groupId)
+        if (!track) {
+          track = { id: crypto.randomUUID(), name: `${template.name} ${trackGroupLabel(groupId)}`, kind: 'visual', groupId, muted: false, locked: false }
+          visualTracks.set(groupId, track)
+          tracks.push(track)
+        }
+        const durationFrames = Math.max(1, Math.round(seconds * preset.fps))
+        const projectWithTracks = { ...current, tracks: [...current.tracks, ...tracks] }
+        timeline.push({
+          id: crypto.randomUUID(), trackId: track.id, assetId: asset.id, type: 'visual', label: `${template.name} ${index + 1}`,
+          startFrame: cursor, durationFrames, sourceInFrame: 0, playbackRate: 1, volume: 1,
+          loop: asset.type === 'video' || asset.type === 'gif',
+          effects: [{ ...(template.effects[index % template.effects.length] || DEFAULT_EFFECTS[0]), id: crypto.randomUUID() }],
+          transform: defaultTransformForAsset(projectWithTracks, asset, track.id, preset),
+          keying: isGreenScreenAsset(asset) ? normalizeKeying({ enabled: true }) : undefined
+        })
+        timeline.push({ id: crypto.randomUUID(), trackId: subtitleTrack.id, type: 'subtitle', label: `字幕 ${index + 1}`, startFrame: cursor, durationFrames, sourceInFrame: 0, effects: [], text: lines[index] || `镜头 ${index + 1}`, style: { ...template.subtitleStyle }, speakerVisible: false })
+        cursor += durationFrames
       })
-      timeline.push({
-        id: crypto.randomUUID(),
-        trackId: 'subtitles',
-        type: 'subtitle',
-        label: `字幕 ${index + 1}`,
-        startFrame: cursor,
-        durationFrames,
-        sourceInFrame: 0,
-        effects: [],
-        text: lines[index] || `猫猫镜头 ${index + 1}`,
-        style: template.subtitleStyle
-      })
-      cursor += durationFrames
-    })
-
-    updateProject({
-      ...project,
-      subtitleStyle: template.subtitleStyle,
-      timeline
-    })
-    setSelectedItemId(timeline[0]?.id || null)
-    setPlayheadFrame(0)
-    setNotice(`已套用模板：${template.name}`)
+      updateProject({ ...current, tracks: [...current.tracks, ...tracks, subtitleTrack], assets: mergeAssets(current.assets, visuals), timeline: [...current.timeline, ...timeline] }, { label: `插入模板：${template.name}` })
+      setSelectedItemId(timeline[0]?.id || null)
+      setPlayheadFrame(startFrame)
+      setNotice(`已插入 ${template.name}，保留原有时间线，可撤销`)
+    } catch (error) {
+      setNotice(errorText(error))
+    } finally {
+      assistantOperationRef.current = false
+      setAssistantBusy(null)
+    }
   }
 
   function syncSubtitles(): void {
@@ -1334,12 +1393,17 @@ function App(): JSX.Element {
   }
 
   async function addRoleCueFromInspector(itemId: string, assetId: string, replaceCueId?: string): Promise<void> {
+    let project = projectRef.current
     if (!project || !currentPreset) return
-    const item = project.timeline.find((entry) => entry.id === itemId)
+    let item = project.timeline.find((entry) => entry.id === itemId)
     const sourceAsset = project.assets.find((entry) => entry.id === assetId) || localAssets.find((entry) => entry.id === assetId)
     if (!item || !isRoleInstanceItem(item) || !sourceAsset || !isVisualAsset(sourceAsset) || isBackgroundAsset(sourceAsset)) return
     const asset = await ensureManagedAsset(sourceAsset)
     if (!asset) return
+    project = projectRef.current
+    if (!project) return
+    item = project.timeline.find((entry) => entry.id === itemId)
+    if (!item || !isRoleInstanceItem(item) || !canEditTrack(item.trackId)) return
     const states = normalizeRoleStates(item.roleStates, item.durationFrames)
     const localFrame = clampNumber(playheadFrame - item.startFrame, 0, Math.max(0, item.durationFrames - 1))
     const previousState = [...states].reverse().find((state) => state.startFrame <= localFrame)
@@ -1389,121 +1453,176 @@ function App(): JSX.Element {
     recordAssetUse(asset)
   }
 
+  function aiConfigured(): boolean {
+    if (settings?.openAi.apiKey?.trim()) return true
+    setNotice('请先配置 OpenAI 兼容服务的 API Key')
+    setToolDrawer('settings')
+    return false
+  }
+
   async function generateAiScript(): Promise<void> {
-    if (!project || !templates.length) return
+    const origin = projectRef.current
+    const template = templates.find((entry) => entry.id === assistant.templateId) || templates[0]
+    if (!origin || !template || assistantOperationRef.current || !aiConfigured()) return
+    const topic = assistant.topic.trim()
+    if (!topic) return
+    const session = projectSessionRef.current
+    assistantOperationRef.current = true
+    setAssistantBusy('script')
     try {
-      setBusy('生成脚本')
-      const activeTemplate = templates[0]
-      const response = await window.catMeme.generateScript({
-        topic: aiTopic,
-        templatePrompt: activeTemplate.prompt,
-        seconds: 14
-      })
-      updateProject({
-        ...project,
-        title: response.title,
-        script: response.subtitles.length ? response.subtitles.join('\n') : response.script,
-        aiRecords: [
-          ...project.aiRecords,
-          {
-            id: crypto.randomUUID(),
-            kind: 'script',
-            prompt: aiTopic,
-            outputText: response.script,
-            createdAt: new Date().toISOString()
-          }
-        ]
-      })
-      setNotice('AI 脚本已生成')
-      setRightTab('script')
+      const response = await window.catMeme.generateScript({ topic, templatePrompt: template.prompt, seconds: assistant.seconds })
+      const script = (response.subtitles.length ? response.subtitles.join('\n') : response.script).trim()
+      if (!script) throw new Error('AI 返回了空脚本，请调整主题后重试')
+      setAssistant((current) => ({ ...current, draft: { projectId: origin.id, session, title: response.title, script, prompt: topic } }))
+      setNotice(projectSessionRef.current === session ? 'AI 草稿已生成，可编辑后应用到工程' : '上一工程的 AI 草稿已返回，可查看或复制文字')
     } catch (error) {
       setNotice(errorText(error))
     } finally {
-      setBusy(null)
+      assistantOperationRef.current = false
+      setAssistantBusy(null)
     }
+  }
+
+  function applyAiDraft(): void {
+    const current = projectRef.current
+    const draft = assistant.draft
+    if (!current || !draft || !draft.script.trim() || draft.projectId !== current.id || draft.session !== projectSessionRef.current) return
+    if (current.script === draft.script && current.title === (draft.title.trim() || current.title)) {
+      setNotice('草稿内容已在当前工程中')
+      return
+    }
+    updateProject({
+      ...current, title: draft.title.trim() || current.title, script: draft.script,
+      aiRecords: [...current.aiRecords, { id: crypto.randomUUID(), kind: 'script', prompt: draft.prompt, outputText: draft.script, createdAt: new Date().toISOString() }]
+    }, { label: '应用 AI 脚本' })
+    setNotice('已应用 AI 草稿，已有片段保留，可撤销')
   }
 
   async function generateVoice(): Promise<void> {
-    if (!project || !currentPreset) return
+    const origin = projectRef.current
+    const text = assistant.voiceText.trim()
+    if (!origin || !text || assistantOperationRef.current || !aiConfigured()) return
+    const session = projectSessionRef.current
+    const startSeconds = playheadFrame / presetForProject(origin).fps
+    assistantOperationRef.current = true
+    setAssistantBusy('voice')
     try {
-      setBusy('生成配音')
-      const asset = await window.catMeme.tts({ text: project.script })
-      addAssetsToProject([asset])
-      setLocalAssets((assets) => [asset, ...assets])
-      const durationFrames = Math.max(currentPreset.fps * 4, Math.max(...project.timeline.map((item) => item.startFrame + item.durationFrames), 0))
-      const voiceItem: TimelineItem = {
-        id: crypto.randomUUID(),
-        trackId: 'voice',
-        assetId: asset.id,
-        type: 'voice',
-        label: asset.title || 'AI 配音',
-        startFrame: 0,
-        durationFrames,
-        sourceInFrame: 0,
-        effects: [],
-        volume: 1
+      const generated = await window.catMeme.tts({ text, voice: assistant.voice.trim() || undefined })
+      setLocalAssets((assets) => mergeAssets(assets, [generated]))
+      if (projectSessionRef.current !== session) {
+        setNotice('配音已保留在素材库；工程已切换，未加入当前时间线')
+        return
       }
-      updateProject({
-        ...project,
-        assets: mergeAssets(project.assets, [asset]),
-        timeline: [...project.timeline.filter((item) => item.type !== 'voice'), voiceItem],
-        aiRecords: [
-          ...project.aiRecords,
-          {
-            id: crypto.randomUUID(),
-            kind: 'tts',
-            prompt: project.script,
-            outputPath: asset.localPath,
-            createdAt: new Date().toISOString()
-          }
-        ]
-      })
-      setNotice('AI 配音已加入时间轴')
+      const asset = { ...generated, duration: await readAudioDuration(generated) }
+      const current = projectRef.current
+      if (!current || projectSessionRef.current !== session) {
+        setNotice('配音已保留在素材库；工程已切换，未加入当前时间线')
+        return
+      }
+      const preset = presetForProject(current)
+      const existingTrack = current.tracks.find((track) => track.kind === 'voice' && !track.locked)
+      const track: TimelineTrack = existingTrack || { id: crypto.randomUUID(), name: 'AI 配音', kind: 'voice', groupId: 'sfx', locked: false, muted: false }
+      const voiceItem: TimelineItem = {
+        id: crypto.randomUUID(), trackId: track.id, assetId: asset.id, type: 'voice', label: asset.title || 'AI 配音',
+        startFrame: Math.round(startSeconds * preset.fps), durationFrames: Math.max(1, Math.ceil(asset.duration * preset.fps)), sourceInFrame: 0, effects: [], volume: 1
+      }
+      updateProject({ ...current, tracks: existingTrack ? current.tracks : [...current.tracks, track], assets: mergeAssets(current.assets, [asset]), timeline: [...current.timeline, voiceItem],
+        aiRecords: [...current.aiRecords, { id: crypto.randomUUID(), kind: 'tts', prompt: text, outputPath: asset.localPath, createdAt: new Date().toISOString() }]
+      }, { label: '添加 AI 配音' })
+      setLocalAssets((assets) => mergeAssets(assets, [asset]))
+      setSelectedItemId(voiceItem.id)
+      setNotice('AI 配音已加入播放头位置，保留已有配音，可撤销')
     } catch (error) {
       setNotice(errorText(error))
     } finally {
-      setBusy(null)
+      assistantOperationRef.current = false
+      setAssistantBusy(null)
     }
   }
 
-  async function saveProject(): Promise<void> {
-    if (!project) return
+  async function saveProject(): Promise<boolean> {
+    if (saveInFlightRef.current) return saveInFlightRef.current
+    const submitted = projectRef.current
+    if (!submitted) return false
+    const session = projectSessionRef.current
+    const operation = (async (): Promise<boolean> => {
+      try {
+        setBusy('保存工程')
+        const result = await window.catMeme.saveProject(submitted)
+        const current = projectRef.current
+        if (!current || current.id !== submitted.id || projectSessionRef.current !== session) return false
+        const saved = result.project
+        savedProjectKeyRef.current = projectContentKey(saved)
+        applyProjectState(reconcileSavedProject(current, submitted, saved))
+        const stillDirty = hasUnsavedProjectChanges()
+        setNotice(`已保存：${result.filePath}${stillDirty ? '（另有新修改尚未保存）' : ''}`)
+        return !stillDirty
+      } catch (error) {
+        setNotice(errorText(error))
+        return false
+      } finally {
+        setBusy(null)
+      }
+    })()
+    saveInFlightRef.current = operation
     try {
-      setBusy('保存工程')
-      const result = await window.catMeme.saveProject(project)
-      replaceProjectWithoutHistory(normalizeProject(result.project))
-      setNotice(`已保存：${result.filePath}`)
-    } catch (error) {
-      setNotice(errorText(error))
+      return await operation
     } finally {
-      setBusy(null)
+      saveInFlightRef.current = null
     }
   }
 
-  async function loadProject(): Promise<void> {
+  function hasUnsavedProjectChanges(): boolean {
+    return Boolean(projectRef.current && projectContentKey(projectRef.current) !== savedProjectKeyRef.current)
+  }
+
+  function requestProjectAction(action: 'new' | 'load' | 'close'): void {
+    if (projectActionInFlightRef.current) return
+    setIsPlaying(false)
+    if (hasUnsavedProjectChanges()) setPendingProjectAction(action)
+    else void performProjectAction(action)
+  }
+
+  async function performProjectAction(action: 'new' | 'load' | 'close'): Promise<void> {
+    if (projectActionInFlightRef.current) return
+    projectActionInFlightRef.current = true
     try {
-      const result = await window.catMeme.loadProject()
+      if (action === 'close') {
+        allowCloseRef.current = true
+        window.close()
+        return
+      }
+      const result = action === 'load' ? await window.catMeme.loadProject() : { project: await window.catMeme.newProject(), filePath: '' }
       if (result?.project) {
         replaceProjectWithoutHistory(normalizeProject(result.project), { resetHistory: true })
         setSelectedItemId(null)
         setPreview(null)
-        setNotice(`已打开：${result.filePath}`)
+        setLastExport(null)
+        setPlayheadFrame(0)
+        setClipClipboard(null)
+        setSoloTrackGroup(null)
+        setActiveTrackGroup('all')
+        setNotice(action === 'load' ? `已打开：${result.filePath}` : '已创建空工程')
       }
     } catch (error) {
       setNotice(errorText(error))
+    } finally {
+      projectActionInFlightRef.current = false
+      setPendingProjectAction(null)
     }
   }
 
-  async function newProject(): Promise<void> {
-    try {
-      const nextProject = await window.catMeme.newProject()
-      replaceProjectWithoutHistory(normalizeProject(nextProject), { resetHistory: true })
-      setSelectedItemId(null)
-      setPreview(null)
-      setNotice('已创建空工程')
-    } catch (error) {
-      setNotice(errorText(error))
-    }
+  function loadProject(): void {
+    requestProjectAction('load')
+  }
+
+  function newProject(): void {
+    requestProjectAction('new')
+  }
+
+  async function saveAndContinue(): Promise<void> {
+    if (!pendingProjectAction) return
+    if (await saveProject()) await performProjectAction(pendingProjectAction)
   }
 
   async function render(mode: 'preview' | 'export' | 'cover', outputPath?: string): Promise<void> {
@@ -1556,12 +1675,14 @@ function App(): JSX.Element {
 
   async function persistSettings(nextSettings: AppSettings): Promise<void> {
     try {
-      setSettings(nextSettings)
+      setSavingSettings(true)
       const saved = await window.catMeme.saveSettings(nextSettings)
       setSettings(saved)
       setNotice('设置已保存')
     } catch (error) {
       setNotice(errorText(error))
+    } finally {
+      setSavingSettings(false)
     }
   }
 
@@ -1955,6 +2076,7 @@ function App(): JSX.Element {
 
   function deleteTrack(trackId: string): void {
     if (!project) return
+    if (!canEditTrack(trackId)) return
     const track = project.tracks.find((item) => item.id === trackId)
     if (!track) return
     const sameKindCount = project.tracks.filter((item) => item.kind === track.kind).length
@@ -1987,6 +2109,7 @@ function App(): JSX.Element {
 
   function splitSelectedItem(): void {
     if (!project || !selectedItem) return
+    if (!canEditTrack(selectedItem.trackId)) return
     if (!splitTimelineItemAtFrame(selectedItem, playheadFrame)) {
       setNotice('播放头需要位于选中片段内部')
     }
@@ -1998,6 +2121,7 @@ function App(): JSX.Element {
       selectedItem && playheadFrame > selectedItem.startFrame && playheadFrame < selectedItem.startFrame + selectedItem.durationFrames
         ? selectedItem
         : project.timeline.find((item) => playheadFrame > item.startFrame && playheadFrame < item.startFrame + item.durationFrames)
+    if (target && !canEditTrack(target.trackId)) return
     if (!target || !splitTimelineItemAtFrame(target, playheadFrame)) {
       setNotice('播放头需要位于片段内部')
     }
@@ -2006,6 +2130,7 @@ function App(): JSX.Element {
   function cutItemAtFrame(itemId: string, frame: number): void {
     if (!project) return
     const item = project.timeline.find((entry) => entry.id === itemId)
+    if (item && !canEditTrack(item.trackId)) return
     if (!item || !splitTimelineItemAtFrame(item, frame)) {
       setNotice('切割位置需要位于片段内部')
     }
@@ -2122,6 +2247,7 @@ function App(): JSX.Element {
 
   function duplicateSelectedItem(): void {
     if (!project || !selectedItem) return
+    if (!canEditTrack(selectedItem.trackId)) return
     const duplicate: TimelineItem = {
       ...selectedItem,
       id: crypto.randomUUID(),
@@ -2145,6 +2271,7 @@ function App(): JSX.Element {
 
   function pasteClipboardItem(): void {
     if (!project || !clipClipboard) return
+    if (!canEditTrack(clipClipboard.trackId)) return
     const trackExists = project.tracks.some((track) => track.id === clipClipboard.trackId)
     if (!trackExists) {
       setNotice('原轨道不存在，无法粘贴这个片段')
@@ -2279,6 +2406,7 @@ function App(): JSX.Element {
 
   function deleteSelectedItem(): void {
     if (!project || !selectedItem) return
+    if (!canEditTrack(selectedItem.trackId)) return
     updateProject({
       ...project,
       timeline: project.timeline.filter((item) => item.id !== selectedItem.id)
@@ -2291,6 +2419,7 @@ function App(): JSX.Element {
     if (!project || !selectedCue) return false
     const item = project.timeline.find((entry) => entry.id === selectedCue.itemId)
     if (!item) return false
+    if (!canEditTrack(item.trackId)) return true
     if (selectedCue.kind === 'subtitle' && isSubtitleStreamItem(item)) {
       updateProject({
         ...project,
@@ -2485,15 +2614,32 @@ function App(): JSX.Element {
     if (track) selectTrack(track.id)
   }
 
+  function canEditTrack(trackId: string): boolean {
+    const track = projectRef.current?.tracks.find((entry) => entry.id === trackId)
+    if (!track?.locked) return true
+    setNotice(`${displayTrackName(track)} 已锁定，请先解锁再编辑`)
+    return false
+  }
+
   function commitProjectChange(nextProject: ProjectFile, options: ProjectCommitOptions = {}): void {
+    if (projectActionInFlightRef.current) return
     const before = projectRef.current
     if (!before) return
-    const after = prepareProjectForHistory(nextProject, currentPreset?.fps || 30)
+    if (before.id !== nextProject.id) {
+      setNotice('工程已切换，未应用上一个工程的编辑结果')
+      return
+    }
+    const lockedTrack = changedLockedTrack(before, nextProject)
+    if (lockedTrack) {
+      setNotice(`${displayTrackName(lockedTrack)} 已锁定，请先解锁再编辑`)
+      return
+    }
+    const after = prepareProjectForHistory(nextProject)
     if (projectHistoryKey(before) === projectHistoryKey(after)) return
 
     const entry: ProjectHistoryEntry = {
-      before: cloneProjectSnapshot(before),
-      after: cloneProjectSnapshot(after),
+      before,
+      after,
       label: options.label || '编辑工程',
       mergeKey: options.mergeKey
     }
@@ -2511,22 +2657,26 @@ function App(): JSX.Element {
   function patchProjectWithoutHistory(getNextProject: (current: ProjectFile) => ProjectFile, options: ProjectCommitOptions = {}): void {
     const current = projectRef.current
     if (!current) return
-    const nextProject = prepareProjectForHistory(getNextProject(current), currentPreset?.fps || 30)
+    const nextProject = prepareProjectForHistory(getNextProject(current))
     if (projectHistoryKey(current) === projectHistoryKey(nextProject)) return
     applyProjectState(nextProject)
     if (options.mergeKey) updateLatestHistoryAfter(nextProject, options.mergeKey)
   }
 
   function replaceProjectWithoutHistory(nextProject: ProjectFile, options: ProjectReplaceOptions = {}): void {
-    applyProjectState(prepareProjectForHistory(nextProject, currentPreset?.fps || 30))
+    applyProjectState(prepareProjectForHistory(nextProject))
     if (options.resetHistory) {
+      projectSessionRef.current += 1
+      setAssistant((current) => ({ ...current, draft: null, voiceText: '', assetIds: [] }))
+      savedProjectKeyRef.current = projectContentKey(projectRef.current!)
       setUndoHistory([])
       setRedoHistory([])
     }
   }
 
   function applyProjectState(nextProject: ProjectFile): void {
-    const snapshot = cloneProjectSnapshot(nextProject)
+    // Project edits create new objects; history can share unchanged assets and clips.
+    const snapshot = nextProject
     projectRef.current = snapshot
     setProject(snapshot)
     reconcileProjectSelection(snapshot)
@@ -2567,7 +2717,7 @@ function App(): JSX.Element {
   }
 
   function updateLatestHistoryAfter(nextProject: ProjectFile, mergeKey: string): void {
-    const after = cloneProjectSnapshot(nextProject)
+    const after = nextProject
     const stack = undoStackRef.current
     const lastEntry = stack[stack.length - 1]
     if (!lastEntry || lastEntry.mergeKey !== mergeKey) return
@@ -2665,9 +2815,10 @@ function App(): JSX.Element {
           </select>
         </div>
         <div className="top-actions">
+          <IconButton title="AI 与模板" onClick={() => setToolDrawer('assistant')} icon={<Sparkles />} />
           <IconButton title="新建工程" onClick={newProject} icon={<FilePlus2 />} />
           <IconButton title="打开工程" onClick={loadProject} icon={<FolderOpen />} />
-          <IconButton title="保存工程" onClick={saveProject} icon={<Save />} />
+          <IconButton title="保存工程" onClick={() => { void saveProject() }} icon={<Save />} />
           <button className="command ghost" onClick={() => void render('preview')} disabled={Boolean(busy)}>
             <Play size={16} />
             预览
@@ -2677,11 +2828,20 @@ function App(): JSX.Element {
             导出
           </button>
           <IconButton title="设置" onClick={() => setToolDrawer('settings')} icon={<Settings />} />
+          <IconButton
+            title={settings.appearance === 'dark' ? '切换浅色模式' : '切换深色模式'}
+            disabled={savingSettings}
+            onClick={() => persistSettings({ ...settings, appearance: settings.appearance === 'dark' ? 'light' : 'dark' })}
+            icon={settings.appearance === 'dark' ? <Sun /> : <Moon />}
+          />
         </div>
       </header>
 
       <section className="statusline">
         <span>{busy ? `${busy}...` : notice}</span>
+        <span className={`project-save-state ${hasUnsavedChanges ? 'dirty' : ''}`}>
+          {hasUnsavedChanges ? '● 未保存' : '无未保存修改'}
+        </span>
         {renderProgress && ['preparing', 'building-filters', 'encoding'].includes(renderProgress.stage) && (
           <div className="status-progress" title={renderProgress.message}>
             <span style={{ width: `${Math.round(renderProgress.percent * 100)}%` }} />
@@ -2859,7 +3019,7 @@ function App(): JSX.Element {
           </div>
           <Timeline
             project={project}
-            availableAssets={mergeAssets(project.assets, localAssets)}
+            availableAssets={availableAssets}
             totalFrames={totalFrames}
             fps={currentPreset.fps}
             selectedItemId={selectedItemId}
@@ -2921,7 +3081,7 @@ function App(): JSX.Element {
             selectedKeyframe={selectedKeyframe}
             playheadFrame={playheadFrame}
             lastExport={lastExport}
-            availableAssets={mergeAssets(project.assets, localAssets)}
+            availableAssets={availableAssets}
             onPatchTrack={patchTrack}
             onPatchItem={updateSelectedItem}
             onCreateSubtitleStream={createSubtitleStreamOnTrack}
@@ -2937,7 +3097,7 @@ function App(): JSX.Element {
         </aside>
       </section>
       {toolDrawer && (
-        <ToolDrawer title={toolDrawer === 'export' ? '导出' : '设置'} icon={toolDrawer === 'export' ? <Rocket /> : <Settings />} onClose={() => setToolDrawer(null)}>
+        <ToolDrawer title={toolDrawer === 'export' ? '导出' : toolDrawer === 'assistant' ? 'AI 与模板' : '设置'} icon={toolDrawer === 'export' ? <Rocket /> : toolDrawer === 'assistant' ? <Sparkles /> : <Settings />} onClose={() => setToolDrawer(null)}>
           {toolDrawer === 'export' ? (
             <ExportDrawerContent
               project={project}
@@ -2952,6 +3112,24 @@ function App(): JSX.Element {
               onExport={() => void render('export')}
               onExportCover={() => void render('cover')}
               onExportAs={() => void exportAs()}
+            />
+          ) : toolDrawer === 'assistant' ? (
+            <AssistantPanel
+              state={assistant}
+              onChange={(patch) => setAssistant((current) => ({ ...current, ...patch }))}
+              templates={templates}
+              assets={availableAssets}
+              script={project.script}
+              configured={Boolean(settings.openAi.apiKey?.trim())}
+              voicePlaceholder={settings.openAi.ttsVoice}
+              busy={assistantBusy}
+              canApplyDraft={Boolean(assistant.draft && assistant.draft.projectId === project.id && assistant.draft.session === projectSessionRef.current)}
+              onSettings={() => setToolDrawer('settings')}
+              onGenerate={generateAiScript}
+              onApplyDraft={applyAiDraft}
+              onEditScript={(script) => commitProjectUpdate((current) => ({ ...current, script }), { label: '编辑脚本', mergeKey: `script:${project.id}` })}
+              onVoice={generateVoice}
+              onTemplate={applyTemplate}
             />
           ) : (
             <SettingsPanel settings={settings} onSave={persistSettings} />
@@ -2979,6 +3157,34 @@ function App(): JSX.Element {
             <ImageIcon size={14} />
             水平翻转
           </button>
+        </div>
+      )}
+      {pendingProjectAction && (
+        <div className="unsaved-backdrop">
+          <section className="unsaved-dialog" role="dialog" aria-modal="true" aria-labelledby="unsaved-title" aria-describedby="unsaved-description"
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Escape' && !busy) setPendingProjectAction(null)
+              if (event.key !== 'Tab') return
+              const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+              const first = buttons[0]
+              const last = buttons[buttons.length - 1]
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault()
+                last?.focus()
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault()
+                first?.focus()
+              }
+            }}>
+            <strong id="unsaved-title">工程有未保存的修改</strong>
+            <p id="unsaved-description">保存后继续，或放弃修改{pendingProjectAction === 'close' ? '并关闭窗口' : pendingProjectAction === 'new' ? '并新建工程' : '并打开其他工程'}。</p>
+            <div className="context-input-actions">
+              <button type="button" disabled={Boolean(busy)} onClick={() => setPendingProjectAction(null)} autoFocus>取消</button>
+              <button type="button" disabled={Boolean(busy)} onClick={() => void performProjectAction(pendingProjectAction)}>放弃修改</button>
+              <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => void saveAndContinue()}>保存后继续</button>
+            </div>
+          </section>
         </div>
       )}
       {contextInput && contextInputItem && (
@@ -3081,15 +3287,18 @@ function AssetLibraryPanel({
   onShowFile: (asset: Asset) => Promise<void>
 }): JSX.Element {
   const subcategories = ASSET_SUBCATEGORIES[primaryCategory] || ASSET_SUBCATEGORIES.all
-  const greenAssets = filteredLocalAssets.filter((asset) => isGreenScreenAsset(asset) && !isExternalAsset(asset))
-  const cachedGreenAssets = greenAssets.filter((asset) => Boolean(greenAlphaVariant(asset))).length
-  const preprocessing = Boolean(preprocessProgress && preprocessProgress.current < preprocessProgress.total)
-  const externalCount = localAssets.filter(isExternalAsset).length
-  const libraryCounts = new Map<string, number>()
-  localAssets.forEach((asset) => {
-    const libraryId = asset.source?.libraryId
-    if (isExternalAsset(asset) && libraryId) libraryCounts.set(libraryId, (libraryCounts.get(libraryId) || 0) + 1)
-  })
+  const greenAssets = useMemo(() => filteredLocalAssets.filter((asset) => isGreenScreenAsset(asset) && !isExternalAsset(asset)), [filteredLocalAssets])
+  const cachedGreenAssets = useMemo(() => greenAssets.filter((asset) => Boolean(greenAlphaVariant(asset))).length, [greenAssets])
+  const preprocessing = isGreenScreenProcessing(preprocessProgress)
+  const libraryCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    localAssets.forEach((asset) => {
+      const libraryId = asset.source?.libraryId
+      if (isExternalAsset(asset) && libraryId) counts.set(libraryId, (counts.get(libraryId) || 0) + 1)
+    })
+    return counts
+  }, [localAssets])
+  const externalCount = useMemo(() => localAssets.filter(isExternalAsset).length, [localAssets])
 
   return (
     <aside className="left-panel asset-workbench">
@@ -3218,6 +3427,7 @@ function AssetLibraryPanel({
           </div>
           <AssetGrid
             assets={filteredLocalAssets}
+            resetKey={JSON.stringify([query, primaryCategory, subCategory, typeFilter, sourceFilter, sortMode])}
             viewMode={viewMode}
             onAdd={onAdd}
             onAddToPurpose={onAddToPurpose}
@@ -3232,6 +3442,7 @@ function AssetLibraryPanel({
 
 function AssetGrid({
   assets,
+  resetKey,
   viewMode,
   onAdd,
   onAddToPurpose,
@@ -3239,6 +3450,7 @@ function AssetGrid({
   onShowFile
 }: {
   assets: Asset[]
+  resetKey: string
   viewMode: AssetViewMode
   onAdd: (asset: Asset, trackKind?: TrackKind) => void
   onAddToPurpose: (asset: Asset, purpose: 'background' | 'role' | 'audio') => void
@@ -3254,7 +3466,7 @@ function AssetGrid({
 
   useEffect(() => {
     setPage(0)
-  }, [assets, viewMode])
+  }, [resetKey, viewMode])
 
   return (
     <>
@@ -4186,7 +4398,7 @@ function QuickPreview({
           />
         )
       })}
-      <PreviewAudioBridge project={project} items={audioItems} visualItems={project.timeline} playheadFrame={playheadFrame} fps={fps} isPlaying={isPlaying} playbackRate={playbackRate} />
+      <PreviewAudioBridge project={project} items={audioItems} playheadFrame={playheadFrame} fps={fps} isPlaying={isPlaying} playbackRate={playbackRate} />
       {subtitles.map((subtitle) => (subtitle.text || (subtitle.speakerVisible && subtitle.speakerName)) && (
         <QuickPreviewTextLayer
           key={`${subtitle.id}:${subtitle.startFrame}:${subtitle.text}`}
@@ -4750,7 +4962,6 @@ function QuickPreviewLayer({
 function PreviewAudioBridge({
   project,
   items,
-  visualItems,
   playheadFrame,
   fps,
   isPlaying,
@@ -4758,44 +4969,19 @@ function PreviewAudioBridge({
 }: {
   project: ProjectFile
   items: TimelineItem[]
-  visualItems: TimelineItem[]
   playheadFrame: number
   fps: number
   isPlaying: boolean
   playbackRate: number
 }): JSX.Element {
-  const roleAudioItems = visualItems.flatMap((item) => {
-    if (!isRoleInstanceItem(item)) return []
-    const track = project.tracks.find((entry) => entry.id === item.trackId)
-    if (track?.muted) return []
-    const localFrame = playheadFrame - item.startFrame
-    const state = activeRoleStateAt(item, localFrame)
-    if (!state || state.muted) return []
-    const asset = project.assets.find((entry) => entry.id === state.assetId)
-    if (asset?.type !== 'video') return []
-    return [
-      {
-        ...item,
-        id: `${item.id}:${state.id}:audio-preview`,
-        assetId: state.assetId,
-        startFrame: item.startFrame + state.startFrame,
-        durationFrames: state.durationFrames,
-        sourceInFrame: state.sourceInFrame || 0,
-        playbackRate: state.playbackRate ?? item.playbackRate,
-        volume: (item.volume ?? 1) * (state.volume ?? 1),
-        roleStates: undefined
-      }
-    ]
-  })
-  const allItems = [...items, ...roleAudioItems]
   return (
     <>
-      {allItems.map((item) => {
+      {items.map((item) => {
         const asset = item.assetId ? project.assets.find((asset) => asset.id === item.assetId) : null
         if (!asset?.fileUrl) return null
         const ducked =
           item.type === 'music' &&
-          allItems.some((other) => other.id !== item.id && other.type !== 'music' && playheadFrame >= other.startFrame && playheadFrame < other.startFrame + other.durationFrames)
+          items.some((other) => other.id !== item.id && other.type !== 'music' && (other.volume ?? 1) > 0 && playheadFrame >= other.startFrame && playheadFrame < other.startFrame + other.durationFrames)
         return (
           <PreviewAudioElement
             key={item.id}
@@ -7862,14 +8048,25 @@ function normalizeCustomPreset(preset?: ExportPreset): ExportPreset {
   }
 }
 
+function presetForProject(project: ProjectFile): ExportPreset {
+  return project.exportPresetId === 'custom'
+    ? normalizeCustomPreset(project.customExportPreset)
+    : EXPORT_PRESETS.find((preset) => preset.id === project.exportPresetId) || EXPORT_PRESETS[0]
+}
+
+function projectFps(project: ProjectFile): number {
+  return presetForProject(project).fps
+}
+
 function normalizeProject(project: ProjectFile): ProjectFile {
+  const fps = projectFps(project)
   const tracks = normalizeProjectTracks(project.tracks || [])
   const normalizedAssets = normalizeAssets(project.assets || [])
   const assetsById = new Map(normalizedAssets.map((asset) => [asset.id, asset]))
   const roleTrackId = tracks.find((track) => track.kind === 'visual' && trackGroupId(track) === 'role')?.id
   const projectForDefaults = { ...project, tracks, assets: normalizedAssets, timeline: project.timeline || [] }
   const subtitleStyle = normalizeSubtitleStyleConfig(upgradeLegacySubtitleStyle(project.subtitleStyle))
-  const normalizedProjectFrames = Math.max(30, Math.round(normalizeProjectDurationSeconds(projectForDefaults, 30) * 30))
+  const normalizedProjectFrames = Math.max(fps, Math.round(normalizeProjectDurationSeconds(projectForDefaults, fps) * fps))
   const fallbackRoles = createStarterRoles(tracks)
   const roles = (project.roles?.length ? project.roles : fallbackRoles).map((role, index) => ({
     ...fallbackRoles[index % fallbackRoles.length],
@@ -7882,7 +8079,7 @@ function normalizeProject(project: ProjectFile): ProjectFile {
     speakerPosition: role.speakerPosition || 'bottom',
     subtitlePosition: role.subtitlePosition || 'top'
   }))
-  const normalizedTimeline = project.timeline.map((item) => {
+  const normalizedTimeline = projectForDefaults.timeline.map((item) => {
     const normalizedItem =
       item.type === 'subtitle'
         ? {
@@ -7927,7 +8124,7 @@ function normalizeProject(project: ProjectFile): ProjectFile {
       createRoleStreamItem({ ...projectForDefaults, tracks, roles, subtitleStyle, timeline: migratedTimeline }, track, normalizedProjectFrames, roleForTrack({ ...projectForDefaults, tracks, roles, subtitleStyle, timeline: migratedTimeline }, track, roles))
     )
   const timeline = roleStreamDefaults.length ? [...migratedTimeline, ...roleStreamDefaults] : migratedTimeline
-  return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline, durationSeconds: normalizeProjectDurationSeconds({ ...project, timeline }, 30) }
+  return { ...project, tracks, assets: normalizedAssets, roles, subtitleStyle, timeline, durationSeconds: normalizeProjectDurationSeconds({ ...project, timeline }, fps) }
 }
 
 function migrateLegacyRoleNameSubtitles(
@@ -8018,21 +8215,17 @@ function normalizeProjectTracks(tracks: TimelineTrack[]): TimelineTrack[] {
     .sort((a, b) => trackGroupOrder(trackGroupId(a)) - trackGroupOrder(trackGroupId(b)))
 }
 
-function prepareProjectForHistory(project: ProjectFile, fps = 30): ProjectFile {
+function prepareProjectForHistory(project: ProjectFile): ProjectFile {
   return {
     ...project,
     tracks: normalizeProjectTracks(project.tracks),
-    durationSeconds: normalizeProjectDurationSeconds(project, fps),
+    durationSeconds: normalizeProjectDurationSeconds(project, projectFps(project)),
     updatedAt: new Date().toISOString()
   }
 }
 
-function cloneProjectSnapshot(project: ProjectFile): ProjectFile {
-  return structuredClone(project)
-}
-
 function projectHistoryKey(project: ProjectFile): string {
-  return JSON.stringify({ ...project, updatedAt: '' })
+  return projectContentKey(project)
 }
 
 function trackGroupId(track?: Pick<TimelineTrack, 'id' | 'name' | 'kind' | 'groupId'> | null): TrackGroupId {
@@ -9282,6 +9475,7 @@ function createTimelineLookup(project: ProjectFile): TimelineLookup {
     (a, b) => (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) || (timelineOrder.get(a.id) ?? 0) - (timelineOrder.get(b.id) ?? 0)
   )
   const previewAudioItems = project.timeline.filter((item) => {
+    if (isRoleInstanceItem(item)) return true
     if (!item.assetId) return false
     if (['voice', 'music', 'sfx'].includes(item.type)) return true
     const asset = assetsById.get(item.assetId)
@@ -9308,14 +9502,18 @@ function findActiveSubtitleItems(lookup: TimelineLookup | null, frame: number, s
   const visibleTracks = visibleTrackIdsForScope(lookup, soloGroup)
   return (lookup.itemsByType.get('subtitle') || [])
     .filter((item) => visibleTracks.has(item.trackId))
-    .flatMap((item) => expandSubtitleStreamForPreview(item, frame, lookup.visualItems))
+    .flatMap((item) => expandSubtitleStreamForPreview(item, frame, lookup.visualItems.filter((visual) => visibleTracks.has(visual.trackId))))
     .filter((item) => frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
 }
 
 function findPreviewAudioItems(lookup: TimelineLookup | null, frame: number, soloGroup?: TrackGroupId | null): TimelineItem[] {
   if (!lookup) return []
   const audibleTracks = visibleTrackIdsForScope(lookup, soloGroup)
-  return lookup.previewAudioItems.filter((item) => audibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
+  return lookup.previewAudioItems
+    .filter((item) => audibleTracks.has(item.trackId) && frame >= item.startFrame && frame < item.startFrame + item.durationFrames)
+    .flatMap((item) => isRoleInstanceItem(item)
+      ? expandRoleInstanceForPreview(item, frame).filter((state) => lookup.assetsById.get(state.assetId || '')?.type === 'video' && (state.volume ?? 1) > 0)
+      : [item])
 }
 
 function expandSubtitleStreamForPreview(item: TimelineItem, frame: number, visualItems: TimelineItem[]): TimelineItem[] {

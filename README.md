@@ -87,7 +87,31 @@ Conservative cleanup keeps `assets/`, `projects/`, `output/`, and `资源/`. His
 - `0`: reset selected visual transform
 - `M`: mute or unmute selected clip
 
+The top-bar moon/sun button switches between light and dark workspaces and saves the preference. Theme changes affect editor chrome and native title-bar controls; project colors and exported media keep their own settings.
+
+Timeline categories filter tracks without hiding other content in the preview. Use the explicit solo control to isolate a group. Locked tracks reject clip edits, splits, insertion and deletion. New/open/close actions offer save, discard and cancel when the current project has changes; a failed save keeps the current project open. `Ctrl + S` also works while typing in a field.
+
+Saving a different project with an existing title chooses a numbered filename instead of overwriting the other project's file. Saving that same project/title again updates its own file. Renaming still saves under the new title; this is not a Save As/file-move feature.
+
+## Automated Checks
+
+`npm.cmd run test` checks workflow files and runs Node-only regression tests for project persistence, concurrent indexes, external libraries, path validation, playback timing, AI response parsing and editor actions. Tests use temporary fixtures, mocked AI responses and a hook/event harness; they do not launch Electron or FFmpeg, make paid AI requests, or access real user media/settings. They do not replace visual, real-provider/media export or portable-package acceptance.
+
+## AI And Templates
+
+Open **AI 与模板** from the top-bar sparkle button. Configure your OpenAI-compatible Base URL, API Key, text model and TTS model/voice in Settings for AI generation. Templates and manual script editing work without an API key.
+
+- **脚本**: choose a story style, topic and target duration; generate and edit a draft, then apply it to the project. Existing clips remain. Unapplied drafts are session-only; apply and save to retain the text in the project.
+- **配音**: fill text from the project or AI draft, edit it, optionally choose a voice, then generate. Audio is added at the request's playhead position using its actual metadata duration; existing voice clips are retained. A locked/missing voice track gets a separate editable track. Generated files remain in the asset library after switching projects or a metadata failure; no automatic audio playback occurs.
+- **模板**: select assets in the desired order and insert scenes at the playhead. Visual and subtitle tracks are added without replacing existing clips. External assets are copied before use; the insertion is one undoable edit. Asset search renders at most 60 matching choices at once.
+
+Duplicate in-flight assistant requests are suppressed. Late AI drafts from another project can be read/copied but cannot be applied to the new project. AI settings and generated project edits use the existing preload APIs and project record format.
+
 ## Packaging
+
+The [Cat Meme Studio homepage](https://cat.fribench.cn/) serves the Windows x64 portable release and its SHA-256 checksum. Page source is in `site/` and the independent Fribench container is in `deploy/fribench/`. Follow the `fribench_ops` shared policy and Cat Meme Studio runbook when publishing.
+
+To stage a public package, build `npm.cmd run build:portable` from a clean release checkout and run `node scripts/stage-desktop-download.mjs`. It writes the portable EXE, `release.json` and `SHA256SUMS.txt` to `release-downloads/<source SHA>/`. Update the homepage links and displayed version when bumping the package. The public package uses `electron-builder.yml`, which excludes the local resource library and user data.
 
 Development directory build:
 

@@ -415,6 +415,7 @@ export interface ProviderSettings {
 
 export interface AppSettings {
   workspaceRoot: string
+  appearance?: 'light' | 'dark'
   openAi: OpenAiSettings
   providers: ProviderSettings
   defaultPresetId: string
